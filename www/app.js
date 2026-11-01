@@ -16,14 +16,6 @@ function sampleRecipes() {
   const ing = (name, qty = '', optional = false) => ({ id: uid(), name, qty, optional });
   return [
     {
-      id: uid(), type: 'recipe', name: 'Spaghetti Bolognese', duration: 45, lastAdded: null,
-      ingredients: [
-        ing('Spaghetti', '500 g'), ing('Rinderhackfleisch', '400 g'), ing('Zwiebel', '1'),
-        ing('Knoblauch', '2 Zehen'), ing('Karotte', '1'), ing('Passierte Tomaten', '1 Packung'),
-        ing('Tomatenmark', '1 EL'), ing('Parmesan', '', true), ing('Rotwein', '1 Glas', true),
-      ],
-    },
-    {
       id: uid(), type: 'standard', name: 'Frühstück', duration: null, lastAdded: null,
       ingredients: [
         ing('Brötchen', '6'), ing('Butter'), ing('Milch', '1 l'), ing('Eier', '6'),
@@ -43,7 +35,33 @@ function defaultState() {
     activeListId: listId,
     recipes: sampleRecipes(),
     sort: { recipe: 'alpha', standard: 'alpha' },
+    suggestions: null, // Vorschlagsliste für Artikel/Zutaten (wird beim Laden befüllt)
+    suggestHidden: [], // vom Nutzer entfernte Vorschläge (nicht wieder automatisch aufnehmen)
+    suggestAuto: true, // neue Artikel automatisch als Vorschlag übernehmen
+    packs: [], // bereits importierte Rezeptsammlungen
   };
+}
+
+// Importiert mitgelieferte Rezeptsammlungen genau einmal.
+function importPacks(st) {
+  if (typeof RECIPE_PACKS === 'undefined') return;
+  for (const pack of RECIPE_PACKS) {
+    if (st.packs.includes(pack.id)) continue;
+    // Altes, unverändertes Beispielrezept durch die vegane Version ersetzen
+    st.recipes = st.recipes.filter((r) => !(r.name === 'Spaghetti Bolognese'
+      && r.ingredients.some((i) => i.name === 'Rinderhackfleisch')));
+    for (const [k, cat] of Object.entries(pack.learned || {})) {
+      if (!st.learned[k]) st.learned[k] = cat;
+    }
+    for (const r of pack.recipes) {
+      if (st.recipes.some((x) => x.type === 'recipe' && norm(x.name) === norm(r.name))) continue;
+      st.recipes.push({
+        id: uid(), type: 'recipe', name: r.name, duration: r.duration ?? null, lastAdded: null,
+        ingredients: r.ingredients.map(([name, qty = '', optional = false]) => ({ id: uid(), name, qty, optional: !!optional })),
+      });
+    }
+    st.packs.push(pack.id);
+  }
 }
 
 function loadState() {
@@ -51,7 +69,7 @@ function loadState() {
     const raw = localStorage.getItem(STORE_KEY);
     if (raw) return normalizeState(JSON.parse(raw));
   } catch (e) { console.error(e); }
-  return defaultState();
+  return normalizeState(defaultState());
 }
 
 function normalizeState(s) {
@@ -64,6 +82,17 @@ function normalizeState(s) {
   if (!Array.isArray(st.recipes)) st.recipes = [];
   st.learned = st.learned || {};
   st.sort = { ...d.sort, ...(st.sort || {}) };
+  if (!Array.isArray(st.packs)) st.packs = [];
+  if (!Array.isArray(st.suggestHidden)) st.suggestHidden = [];
+  if (typeof st.suggestAuto !== 'boolean') st.suggestAuto = true;
+  importPacks(st);
+  if (!Array.isArray(st.suggestions)) {
+    // Erstbefüllung aus allen bekannten Artikeln und Zutaten
+    const names = new Map();
+    st.recipes.forEach((r) => r.ingredients.forEach((i) => names.set(norm(i.name), i.name.trim())));
+    st.lists.forEach((l) => l.items.forEach((i) => names.set(norm(i.name), i.name.trim())));
+    st.suggestions = [...names.values()].filter(Boolean).sort((a, b) => a.localeCompare(b, 'de'));
+  }
   return st;
 }
 
@@ -214,6 +243,81 @@ function toast(msg) {
   toastTimer = setTimeout(() => t.classList.remove('show'), 2400);
 }
 
+/* ================= Vorschläge ================= */
+// Eigene Vorschlagsleiste statt <datalist>: Die Android-Vorschlagsliste
+// verdeckt die Tastatur, diese Chips sitzen direkt am Eingabefeld.
+
+function learnSuggestion(name) {
+  name = String(name || '').trim();
+  if (!name || !state.suggestAuto) return;
+  const k = norm(name);
+  if (state.suggestHidden.includes(k)) return;
+  if (!state.suggestions.some((x) => norm(x) === k)) state.suggestions.push(name);
+}
+
+function findSuggestions(q) {
+  q = norm(q);
+  if (!q) return [];
+  const starts = [];
+  const contains = [];
+  for (const sug of state.suggestions) {
+    const n = norm(sug);
+    if (n === q) continue;
+    if (n.startsWith(q) || n.split(/[\s(-]+/).some((w) => w.startsWith(q))) starts.push(sug);
+    else if (q.length >= 3 && n.includes(q)) contains.push(sug);
+  }
+  const by = (a, b) => a.localeCompare(b, 'de');
+  return [...starts.sort(by), ...contains.sort(by)].slice(0, 15);
+}
+
+function updateSuggest(input) {
+  const scope = input.closest('[data-suggest-scope]');
+  const bar = scope && $('.suggest', scope);
+  if (!bar) return;
+  const items = document.activeElement === input ? findSuggestions(input.value) : [];
+  bar.innerHTML = items.map((x) => `<button type="button" class="chip" data-pick="${esc(x)}">${esc(x)}</button>`).join('');
+  bar.hidden = !items.length;
+  bar.scrollLeft = 0;
+}
+
+function hideSuggest(scope) {
+  const bar = scope && $('.suggest', scope);
+  if (bar) { bar.hidden = true; bar.innerHTML = ''; }
+}
+
+document.addEventListener('input', (e) => {
+  if (e.target.matches && e.target.matches('[data-suggest]')) updateSuggest(e.target);
+});
+document.addEventListener('focusout', (e) => {
+  if (!e.target.matches || !e.target.matches('[data-suggest]')) return;
+  const scope = e.target.closest('[data-suggest-scope]');
+  setTimeout(() => {
+    if (!scope.contains(document.activeElement) || !document.activeElement.matches('[data-suggest]')) hideSuggest(scope);
+  }, 150);
+});
+// Fokus beim Antippen eines Chips behalten, damit die Tastatur offen bleibt
+document.addEventListener('pointerdown', (e) => {
+  if (e.target.closest && e.target.closest('[data-pick]')) e.preventDefault();
+});
+document.addEventListener('click', (e) => {
+  const chip = e.target.closest && e.target.closest('[data-pick]');
+  if (!chip) return;
+  const scope = chip.closest('[data-suggest-scope]');
+  const input = $('[data-suggest]', scope);
+  input.value = chip.dataset.pick;
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  hideSuggest(scope);
+  const next = $('[data-suggest-next]', scope);
+  (next || input).focus();
+});
+
+// Eingabefelder in Sheets über die Tastatur scrollen
+document.addEventListener('focusin', (e) => {
+  if (e.target.matches && e.target.matches('.sheet input, .sheet select')) {
+    setTimeout(() => e.target.scrollIntoView({ block: 'center', behavior: 'smooth' }), 300);
+  }
+});
+
 /* ================= Rendering ================= */
 
 const TITLES = { list: 'Einkaufsliste', recipe: 'Gerichte', standard: 'Standardeinkäufe', settings: 'Mehr' };
@@ -236,16 +340,10 @@ function render() {
     if (el) {
       el.focus();
       try { if (selStart != null) el.setSelectionRange(selStart, selStart); } catch (e) { /* ignore */ }
+      if (el.matches('[data-suggest]')) updateSuggest(el);
     }
   }
   if (ui.view === 'list') scheduleHideRender();
-}
-
-function knownNames() {
-  const names = new Map();
-  state.recipes.forEach((r) => r.ingredients.forEach((i) => names.set(norm(i.name), i.name)));
-  state.lists.forEach((l) => l.items.forEach((i) => names.set(norm(i.name), i.name)));
-  return [...names.values()].sort((a, b) => a.localeCompare(b, 'de'));
 }
 
 function renderListView() {
@@ -276,12 +374,14 @@ function renderListView() {
       </select>
       <button class="icon-btn" data-act="listMenu" aria-label="Liste bearbeiten">⋯</button>
     </div>
-    <form id="addForm" class="addrow">
-      <input id="addName" class="input" placeholder="Artikel hinzufügen" autocomplete="off" list="known" enterkeyhint="done">
-      <input id="addQty" class="input qty-input" placeholder="Menge" autocomplete="off">
-      <button class="btn primary add-btn" aria-label="Hinzufügen">＋</button>
-      <datalist id="known">${knownNames().map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
-    </form>
+    <div class="add-wrap" data-suggest-scope>
+      <form id="addForm" class="addrow">
+        <input id="addName" class="input" placeholder="Artikel hinzufügen" autocomplete="off" autocorrect="off" data-suggest enterkeyhint="done">
+        <input id="addQty" class="input qty-input" placeholder="Menge" autocomplete="off" data-suggest-next>
+        <button class="btn primary add-btn" aria-label="Hinzufügen">＋</button>
+      </form>
+      <div class="suggest" hidden></div>
+    </div>
     ${groups.length ? groups.map((g) => `
       <section class="group">
         <h2 class="group-title">${esc(g.c.name)}</h2>
@@ -379,6 +479,11 @@ function renderSettings() {
       <button class="btn ghost wide" data-act="catAdd">＋ Kategorie hinzufügen</button>
     </section>
     <section class="panel">
+      <h2>Vorschläge</h2>
+      <p class="muted">Beim Eintippen von Artikeln und Zutaten erscheinen passende Vorschläge (${state.suggestions.length} Einträge). Du kannst sie hier bearbeiten.</p>
+      <button class="btn ghost wide" data-act="suggestManage">Vorschläge bearbeiten</button>
+    </section>
+    <section class="panel">
       <h2>Datensicherung</h2>
       <p class="muted">Deine Daten liegen nur auf diesem Handy. Mit einem Backup kannst du sie sichern oder auf ein neues Handy übertragen.</p>
       <button class="btn ghost wide" data-act="backupExport">Backup in Zwischenablage kopieren</button>
@@ -436,10 +541,11 @@ function openAddRecipeSheet(recipe) {
 function ingredientRow(i = { name: '', qty: '', optional: false }) {
   const cat = i.name ? categorize(i.name) : 'other';
   return `
-    <div class="ing-row">
+    <div class="ing-row" data-suggest-scope>
+      <div class="suggest" hidden></div>
       <div class="ing-line">
-        <input class="input" name="name" placeholder="Zutat" value="${esc(i.name)}" autocomplete="off" list="known-edit">
-        <input class="input qty-input" name="qty" placeholder="Menge" value="${esc(i.qty)}" autocomplete="off">
+        <input class="input" name="name" placeholder="Zutat" value="${esc(i.name)}" autocomplete="off" autocorrect="off" data-suggest>
+        <input class="input qty-input" name="qty" placeholder="Menge" value="${esc(i.qty)}" autocomplete="off" data-suggest-next>
         <button type="button" class="icon-btn" data-del aria-label="Entfernen">✕</button>
       </div>
       <div class="ing-line small">
@@ -464,7 +570,6 @@ function openRecipeEditor(type, recipe = null) {
       <h3>${type === 'recipe' ? 'Zutaten' : 'Artikel'}</h3>
       <p class="muted small-text">„optional“ = beim Hinzufügen zunächst nicht ausgewählt.</p>
       <div class="ing-rows">${r.ingredients.map(ingredientRow).join('')}</div>
-      <datalist id="known-edit">${knownNames().map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
       <button type="button" class="btn ghost wide" data-addrow>＋ ${type === 'recipe' ? 'Zutat' : 'Artikel'} hinzufügen</button>
       <div class="btn-row sticky">
         ${isNew ? '' : '<button type="button" class="btn danger" data-delete>Löschen</button>'}
@@ -523,6 +628,7 @@ function openRecipeEditor(type, recipe = null) {
       if (!iname) return null;
       const sel = $('select[name=cat]', row);
       if (sel.dataset.touched) state.learned[norm(iname)] = sel.value;
+      learnSuggestion(iname);
       return {
         id: old.get(norm(iname)) || uid(),
         name: iname,
@@ -606,6 +712,61 @@ function openListMenu() {
   });
 }
 
+/* ================= Vorschläge verwalten ================= */
+
+function openSuggestManager() {
+  const box = openSheet(`
+    <h2>Vorschläge</h2>
+    <label class="switch-row"><input type="checkbox" data-auto ${state.suggestAuto ? 'checked' : ''}>
+      <span>Neue Artikel und Zutaten automatisch als Vorschlag übernehmen</span></label>
+    <form class="addrow" data-addform>
+      <input class="input" name="v" placeholder="Neuen Vorschlag eingeben" autocomplete="off">
+      <button class="btn primary add-btn" aria-label="Hinzufügen">＋</button>
+    </form>
+    <input class="input search" type="search" placeholder="Filtern…" data-filter>
+    <div class="sg-list"></div>
+    <div class="btn-row sticky"><button class="btn primary" data-x>Fertig</button></div>`,
+  { full: true, onClose: () => { save(); render(); } });
+
+  const listEl = $('.sg-list', box);
+  const draw = () => {
+    const q = norm($('[data-filter]', box).value);
+    const items = state.suggestions
+      .filter((x) => !q || norm(x).includes(q))
+      .sort((a, b) => a.localeCompare(b, 'de'));
+    listEl.innerHTML = items.length ? items.map((x) => `
+      <div class="sg-row"><span>${esc(x)}</span>
+      <button type="button" class="icon-btn" data-remove="${esc(x)}" aria-label="Entfernen">✕</button></div>`).join('')
+      : `<p class="muted center">${q ? 'Nichts gefunden.' : 'Keine Vorschläge vorhanden.'}</p>`;
+  };
+  draw();
+  $('[data-filter]', box).addEventListener('input', draw);
+  $('[data-auto]', box).onchange = (e) => { state.suggestAuto = e.target.checked; save(); };
+  $('[data-addform]', box).onsubmit = (e) => {
+    e.preventDefault();
+    const input = e.target.v;
+    const name = input.value.trim();
+    if (!name) return;
+    const k = norm(name);
+    state.suggestHidden = state.suggestHidden.filter((h) => h !== k);
+    if (!state.suggestions.some((x) => norm(x) === k)) state.suggestions.push(name);
+    input.value = '';
+    save();
+    draw();
+    toast(`„${name}“ hinzugefügt`);
+  };
+  listEl.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-remove]');
+    if (!b) return;
+    const k = norm(b.dataset.remove);
+    state.suggestions = state.suggestions.filter((x) => norm(x) !== k);
+    if (!state.suggestHidden.includes(k)) state.suggestHidden.push(k);
+    save();
+    draw();
+  });
+  $('[data-x]', box).onclick = () => closeSheet();
+}
+
 /* ================= Events ================= */
 
 $('.tabbar').addEventListener('click', (e) => {
@@ -624,6 +785,7 @@ main.addEventListener('submit', (e) => {
   const name = $('#addName').value.trim();
   if (!name) return;
   addItemToList(activeList(), { name, qty: $('#addQty').value });
+  learnSuggestion(name);
   $('#addName').value = '';
   $('#addQty').value = '';
   save();
@@ -725,6 +887,7 @@ main.addEventListener('click', async (e) => {
       commit();
       break;
     }
+    case 'suggestManage': openSuggestManager(); break;
     case 'catAdd': {
       const name = await askText('Neue Kategorie', '', 'z. B. Asia-Regal');
       if (!name) return;
@@ -771,4 +934,5 @@ main.addEventListener('click', async (e) => {
   }
 });
 
+save(); // Migrationen (z. B. importierte Rezepte) direkt sichern
 render();

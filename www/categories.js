@@ -23,6 +23,7 @@ const DEFAULT_CATEGORIES = [
 // Stichwörter mit max. 3 Buchstaben müssen als ganzes Wort vorkommen.
 const CATEGORY_KEYWORDS = {
   produce: [
+    'chili', 'prinzessinnenbohnen', 'pak choi', 'chinakohl', 'landgurke',
     'apfel', 'äpfel', 'banane', 'birne', 'orange', 'mandarine', 'clementine', 'zitrone', 'limette',
     'traube', 'erdbeer', 'himbeer', 'heidelbeer', 'blaubeer', 'beeren', 'kirsche', 'pfirsich',
     'nektarine', 'pflaume', 'mango', 'ananas', 'kiwi', 'melone', 'avocado', 'granatapfel',
@@ -39,6 +40,7 @@ const CATEGORY_KEYWORDS = {
     'wraps', 'tortilla', 'fladenbrot', 'pita', 'naan', 'burger buns', 'buns', 'semmel', 'kuchen',
   ],
   dairy: [
+    'tempeh', 'hummus', 'falafel', 'flammkuchenteig', 'seidentofu', 'räuchertofu', 'sojajoghurt', 'veganer joghurt',
     'milch', 'butter', 'käse', 'joghurt', 'jogurt', 'quark', 'sahne', 'schmand', 'saure sahne',
     'crème fraîche', 'creme fraiche', 'crème', 'mozzarella', 'parmesan', 'feta', 'frischkäse',
     'gouda', 'emmentaler', 'ricotta', 'mascarpone', 'halloumi', 'burrata', 'skyr', 'kefir',
@@ -46,17 +48,20 @@ const CATEGORY_KEYWORDS = {
     'hefe', 'gnocchi', 'blätterteig', 'pizzateig', 'tortellini', 'maultaschen',
   ],
   meat: [
+    'gyros', 'patties', 'patty', 'chicken', 'sojahack', 'sojaschnitzel', 'nuggets',
     'hähnchen', 'huhn', 'hühnchen', 'hühner', 'geflügel', 'pute', 'puten', 'rind', 'schwein',
     'hack', 'hackfleisch', 'speck', 'schinken', 'salami', 'wurst', 'würstchen', 'bratwurst',
     'lachs', 'garnele', 'shrimps', 'fisch', 'steak', 'bacon', 'chorizo', 'lamm', 'kalb',
     'filet', 'gulasch', 'schnitzel', 'aufschnitt', 'pancetta', 'mett', 'forelle', 'kabeljau',
   ],
   pasta: [
+    'sojageschnetzeltes', 'udon', 'ramen', 'falafel-fertigmischung', 'fertigmischung',
     'nudel', 'spaghetti', 'penne', 'pasta', 'fusilli', 'tagliatelle', 'lasagne', 'farfalle',
     'rigatoni', 'makkaroni', 'reis', 'risotto', 'basmati', 'couscous', 'bulgur', 'quinoa',
     'linsen', 'polenta', 'glasnudeln', 'mie nudeln', 'reisnudeln', 'spätzle',
   ],
   canned: [
+    'pflanzenöl', 'kokosöl', 'chiliöl', 'erdnussmus', 'mandelmus', 'cashewmus', 'misopaste', 'miso', 'chilibohnen', 'limabohnen', 'riesenbohnen', 'passata', 'pepperoni', 'peperoni (glas)',
     'dose', 'tomatenmark', 'passierte tomaten', 'gehackte tomaten', 'dosentomaten',
     'kokosmilch', 'brühe', 'fond', 'ketchup', 'senf', 'mayo', 'mayonnaise', 'sojasauce',
     'sojasoße', 'essig', 'balsamico', 'öl', 'olivenöl', 'sonnenblumenöl', 'rapsöl', 'sesamöl',
@@ -66,12 +71,14 @@ const CATEGORY_KEYWORDS = {
     'apfelessig', 'sambal', 'sriracha', 'tabasco',
   ],
   baking: [
+    'hefeflocken', 'garam masala', 'italienische kräuter', 'kräuter der provence', 'sesam', 'leinsamen', 'schokodrops', 'gemahlen', 'chiasamen', 'flohsamen',
     'salz', 'pfeffer', 'paprikapulver', 'curry', 'currypulver', 'zimt', 'oregano', 'kreuzkümmel',
     'kümmel', 'muskat', 'mehl', 'zucker', 'puderzucker', 'backpulver', 'natron', 'vanille',
     'vanillezucker', 'speisestärke', 'stärke', 'kakao', 'gewürz', 'lorbeer', 'chiliflocken',
     'kurkuma', 'knoblauchpulver', 'zwiebelpulver', 'trockenhefe', 'gelatine', 'schokotropfen', 'mandeln gemahlen',
   ],
   breakfast: [
+    'proteinpulver', 'bionella',
     'müsli', 'haferflocken', 'cornflakes', 'marmelade', 'konfitüre', 'honig', 'nutella',
     'nuss-nougat', 'aufstrich', 'schokolade', 'kekse', 'zwieback', 'sirup', 'ahornsirup',
   ],
@@ -104,6 +111,8 @@ function guessCategory(name) {
   const n = String(name || '').trim().toLowerCase();
   if (!n) return 'other';
   const tokens = n.split(/[^a-zäöüß]+/).filter(Boolean);
+  // "TK-…" bzw. "(TK)" kommt immer aus dem Tiefkühlregal
+  if (tokens.includes('tk') || n.includes('tiefkühl') || n.includes('tiefgekühlt')) return 'frozen';
   for (const { k, cat } of KEYWORD_INDEX) {
     if (k.length <= 3 ? tokens.includes(k) : n.includes(k)) return cat;
   }
