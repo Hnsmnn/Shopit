@@ -1,0 +1,72 @@
+name: Android-APK bauen
+
+on:
+  push:
+    branches: [main, 'claude/**']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Abhängigkeiten installieren
+        run: npm ci
+
+      - name: Web-App in Android-Projekt kopieren
+        run: npx cap sync android
+
+      - name: Signatur-Schlüssel bereitstellen
+        env:
+          KEYSTORE_BASE64: ${{ secrets.SHOPIT_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/shopit.keystore"
+            echo "SHOPIT_KEYSTORE_FILE=$RUNNER_TEMP/shopit.keystore" >> "$GITHUB_ENV"
+          else
+            echo "::warning::Kein Secret SHOPIT_KEYSTORE_BASE64 – APK wird mit Debug-Schlüssel signiert (Updates erfordern Neuinstallation)."
+          fi
+
+      - name: APK bauen
+        working-directory: android
+        env:
+          SHOPIT_KEYSTORE_PASSWORD: ${{ secrets.SHOPIT_KEYSTORE_PASSWORD }}
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+          cp app/build/outputs/apk/release/app-release.apk ../Shopit.apk
+
+      - name: APK als Artefakt speichern
+        uses: actions/upload-artifact@v4
+        with:
+          name: Shopit-apk
+          path: Shopit.apk
+
+      - name: Release veröffentlichen
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: Shopit 1.0.${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          make_latest: true
+          files: Shopit.apk
+          body: |
+            Neue Version von Shopit (Branch `${{ github.ref_name }}`).
+            Am Android-Handy **Shopit.apk** herunterladen und öffnen, um die App zu installieren bzw. zu aktualisieren.
