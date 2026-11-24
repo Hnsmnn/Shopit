@@ -1,6 +1,6 @@
 # Shopit 🛒
 
-Einkaufslisten-App für Android – mit Gerichten, Standardeinkäufen und automatischer Sortierung nach Kategorien.
+Einkaufslisten-App fürs Handy (iPhone & Android) – mit Gerichten, Standardeinkäufen und automatischer Sortierung nach Kategorien.
 
 ## Funktionen
 
@@ -15,12 +15,16 @@ Einkaufslisten-App für Android – mit Gerichten, Standardeinkäufen und automa
 
 ## App installieren
 
-1. Am Handy die neueste Version öffnen: **[Shopit.apk herunterladen](https://github.com/Hnsmnn/shopit/releases/latest/download/Shopit.apk)**
-2. Die Datei öffnen. Android fragt beim ersten Mal, ob Installationen aus dieser Quelle erlaubt werden sollen → erlauben.
-3. Updates werden genauso installiert – deine Daten bleiben erhalten.
+Shopit ist eine Web-App (PWA) und läuft auf iPhone und Android – ohne App Store.
+
+1. Am Handy öffnen: **https://hnsmnn.github.io/Shopit/**
+2. **iPhone (Safari):** „Teilen“ → „Zum Home-Bildschirm“
+   **Android (Chrome):** Menü ⋮ → „App installieren“
+3. Shopit startet dann wie eine normale App und funktioniert auch offline. Updates kommen automatisch.
 
 ## Entwicklung
 
-- Web-App (HTML/CSS/JS ohne Build-Schritt) in `www/`, verpackt mit [Capacitor](https://capacitorjs.com/) als Android-App in `android/`
-- Lokal im Browser testen: `cd www && python3 -m http.server`
-- Jeder Push baut über GitHub Actions automatisch eine neue APK und veröffentlicht sie unter „Releases“
+- Reine Web-App ohne Build-Schritt: `index.html`, `style.css`, `app.js`, `categories.js` (Kategorie-Erkennung), `recipes-vegan.js` (Rezeptsammlung)
+- `sw.js` sorgt für Offline-Betrieb, `manifest.webmanifest` für die Installation
+- Lokal testen: `python3 -m http.server` im Repo-Ordner, dann http://localhost:8000
+- Veröffentlicht wird über GitHub Pages (Einstellungen → Pages → Branch)

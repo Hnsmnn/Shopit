@@ -1,8 +1,0 @@
-{
-  "appId": "de.hnsmnn.shopit",
-  "appName": "Shopit",
-  "webDir": "www",
-  "plugins": {
-    "SystemBars": { "insetsHandling": "css", "initialViewportFitValueHint": "cover" }
-  }
-}

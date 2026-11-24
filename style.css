@@ -185,7 +185,7 @@ main { padding: 12px 16px calc(96px + var(--bottom)); max-width: 640px; margin: 
 .dialog-backdrop.open .dialog { transform: none; opacity: 1; }
 .dialog h3 { margin: 0 0 12px; }
 .dialog p { margin: 0 0 12px; }
-.backup { min-height: 140px; font-family: monospace; font-size: 12px; }
+.backup { min-height: 140px; font-family: monospace; font-size: 16px; }
 
 .btn-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; flex-wrap: wrap; }
 .btn-row .btn.primary { flex: 1; }
@@ -209,7 +209,7 @@ main { padding: 12px 16px calc(96px + var(--bottom)); max-width: 640px; margin: 
 .ing-row { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 8px; margin-top: 8px; }
 .ing-line { display: flex; gap: 6px; align-items: center; }
 .ing-line.small { margin-top: 6px; }
-.ing-line.small .input { min-height: 36px; padding: 6px 10px; font-size: 14px; }
+.ing-line.small .input { min-height: 36px; padding: 6px 10px; font-size: 16px; }
 .switch { display: flex; align-items: center; gap: 6px; font-size: 14px; color: var(--muted); white-space: nowrap; padding: 0 6px; }
 .switch input { width: 20px; height: 20px; accent-color: var(--accent); }
 

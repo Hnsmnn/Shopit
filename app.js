@@ -293,12 +293,12 @@ document.addEventListener('focusout', (e) => {
   const scope = e.target.closest('[data-suggest-scope]');
   setTimeout(() => {
     if (!scope.contains(document.activeElement) || !document.activeElement.matches('[data-suggest]')) hideSuggest(scope);
-  }, 150);
+  }, 250);
 });
 // Fokus beim Antippen eines Chips behalten, damit die Tastatur offen bleibt
-document.addEventListener('pointerdown', (e) => {
+['pointerdown', 'mousedown'].forEach((type) => document.addEventListener(type, (e) => {
   if (e.target.closest && e.target.closest('[data-pick]')) e.preventDefault();
-});
+}));
 document.addEventListener('click', (e) => {
   const chip = e.target.closest && e.target.closest('[data-pick]');
   if (!chip) return;
@@ -462,6 +462,10 @@ function renderRecipeView(type) {
   `;
 }
 
+function isStandalone() {
+  return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+}
+
 function renderSettings() {
   const cats = state.categories;
   return `
@@ -489,7 +493,14 @@ function renderSettings() {
       <button class="btn ghost wide" data-act="backupExport">Backup in Zwischenablage kopieren</button>
       <button class="btn ghost wide" data-act="backupImport">Backup wiederherstellen</button>
     </section>
-    <p class="muted center">Shopit 1.0</p>
+    ${isStandalone() ? '' : `
+    <section class="panel">
+      <h2>Als App installieren</h2>
+      <p class="muted"><b>iPhone (Safari):</b> Unten auf „Teilen“ <span aria-hidden="true">⬆︎</span> tippen → „Zum Home-Bildschirm“.<br>
+      <b>Android (Chrome):</b> Menü ⋮ → „App installieren“ bzw. „Zum Startbildschirm hinzufügen“.</p>
+      <p class="muted">Danach startet Shopit wie eine normale App und funktioniert auch offline.</p>
+    </section>`}
+    <p class="muted center">Shopit 2.0</p>
   `;
 }
 
@@ -936,3 +947,8 @@ main.addEventListener('click', async (e) => {
 
 save(); // Migrationen (z. B. importierte Rezepte) direkt sichern
 render();
+
+// Offline-Unterstützung
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => { navigator.serviceWorker.register('sw.js').catch(() => {}); });
+}
