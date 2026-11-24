@@ -65,6 +65,18 @@ function importPacks(st) {
   }
 }
 
+// Übernimmt Zubereitungsschritte der Rezeptsammlung genau einmal.
+function importSteps(st) {
+  if (typeof RECIPE_STEPS === 'undefined' || st.packs.includes(RECIPE_STEPS.id)) return;
+  for (const [name, data] of Object.entries(RECIPE_STEPS.recipes)) {
+    const r = st.recipes.find((x) => x.type === 'recipe' && norm(x.name) === norm(name));
+    if (!r || (Array.isArray(r.steps) && r.steps.length)) continue;
+    r.steps = data.steps.map((x) => ({ id: uid(), title: x.title || '', text: x.text || '' }));
+    if (!r.tip) r.tip = data.tip || '';
+  }
+  st.packs.push(RECIPE_STEPS.id);
+}
+
 function loadState() {
   try {
     const raw = localStorage.getItem(STORE_KEY);
@@ -88,6 +100,9 @@ function normalizeState(s) {
   if (typeof st.suggestAuto !== 'boolean') st.suggestAuto = true;
   st.backup = { ...d.backup, ...(st.backup || {}) };
   importPacks(st);
+  importSteps(st);
+  st.recipes.forEach((r) => { if (!Array.isArray(r.steps)) r.steps = []; if (typeof r.tip !== 'string') r.tip = ''; });
+  st.cook = { autoRead: false, ...(st.cook || {}) };
   if (!Array.isArray(st.suggestions)) {
     // Erstbefüllung aus allen bekannten Artikeln und Zutaten
     const names = new Map();
@@ -532,7 +547,7 @@ function renderRecipeView(type) {
     </div>
     ${items.length ? items.map((r) => `
       <div class="card" data-id="${r.id}">
-        <div class="card-main" data-act="addRecipe">
+        <div class="card-main" data-act="${type === 'recipe' ? 'viewRecipe' : 'addRecipe'}">
           <div class="card-title">${esc(r.name)}</div>
           <div class="card-meta">
             ${type === 'recipe' ? `<span>⏱ ${r.duration ? `${r.duration} min` : '–'}</span>` : ''}
@@ -540,6 +555,7 @@ function renderRecipeView(type) {
             <span>${relDays(r.lastAdded)}</span>
           </div>
         </div>
+        ${type === 'recipe' ? '<button class="icon-btn" data-act="addRecipe" aria-label="Zur Einkaufsliste">🛒</button>' : ''}
         <button class="icon-btn" data-act="editRecipe" aria-label="Bearbeiten">✎</button>
       </div>`).join('') : `
       <div class="empty">
@@ -600,13 +616,290 @@ function renderSettings() {
       <b>Android (Chrome):</b> Menü ⋮ → „App installieren“ bzw. „Zum Startbildschirm hinzufügen“.</p>
       <p class="muted">Danach startet Shopit wie eine normale App und funktioniert auch offline.</p>
     </section>`}
-    <p class="muted center">Shopit 2.0</p>
+    <p class="muted center">Shopit 2.1</p>
   `;
+}
+
+/* ================= Rezept ansehen ================= */
+
+function openRecipeView(recipe) {
+  const box = openSheet('<div class="recipe-view"></div>', { full: true });
+  const view = $('.recipe-view', box);
+  const draw = () => {
+    const r = recipe;
+    const steps = r.steps || [];
+    view.innerHTML = `
+      <h2>${esc(r.name)}</h2>
+      <div class="card-meta">
+        <span>⏱ ${r.duration ? `${r.duration} min` : '–'}</span>
+        <span>${r.ingredients.length} Zutaten</span>
+        <span>${relDays(r.lastAdded)}</span>
+      </div>
+      <div class="btn-row view-actions">
+        <button class="btn primary" data-cook ${steps.length ? '' : 'disabled'}>👩‍🍳 Kochen starten</button>
+        <button class="btn ghost" data-tolist>🛒 Zur Liste</button>
+      </div>
+      <h3>Zutaten</h3>
+      <ul class="ing-view">
+        ${r.ingredients.map((i) => `<li><span>${esc(i.name)}${i.optional ? ' <span class="tag">optional</span>' : ''}</span><span class="qty">${esc(i.qty)}</span></li>`).join('') || '<li class="muted">Keine Zutaten hinterlegt.</li>'}
+      </ul>
+      <h3>Zubereitung</h3>
+      ${steps.length ? `<ol class="steps-view">
+        ${steps.map((st) => `<li>${st.title ? `<b>${esc(st.title)}</b>` : ''}${st.text ? `<span>${esc(st.text)}</span>` : ''}</li>`).join('')}
+      </ol>` : '<p class="muted">Noch keine Schritte hinterlegt. Tippe auf „Bearbeiten“, um sie hinzuzufügen.</p>'}
+      ${r.tip ? `<div class="tip-box">💡 <span>${esc(r.tip)}</span></div>` : ''}
+      <div class="btn-row sticky">
+        <button class="btn ghost" data-edit>✎ Bearbeiten</button>
+        <button class="btn primary" data-x>Schließen</button>
+      </div>`;
+  };
+  draw();
+  view.addEventListener('click', (e) => {
+    if (e.target.closest('[data-x]')) closeSheet();
+    else if (e.target.closest('[data-tolist]')) openAddRecipeSheet(recipe, draw);
+    else if (e.target.closest('[data-cook]')) openCookMode(recipe);
+    else if (e.target.closest('[data-edit]')) openRecipeEditor(recipe.type, recipe, { onSaved: draw, onDeleted: true });
+  });
+}
+
+/* ================= Kochmodus ================= */
+// Großer Schritt-für-Schritt-Modus: Bildschirm bleibt an, Wischen oder Tippen
+// zum Blättern, optional Vorlesen und Sprachsteuerung („weiter“, „zurück“ …).
+
+const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+function speechVoice() {
+  if (!('speechSynthesis' in window)) return null;
+  const voices = speechSynthesis.getVoices();
+  return voices.find((v) => v.lang === 'de-DE' && v.localService)
+    || voices.find((v) => v.lang && v.lang.startsWith('de')) || null;
+}
+
+function openCookMode(recipe) {
+  const steps = recipe.steps || [];
+  const total = steps.length;
+  let idx = 0; // 0 = Zutaten, 1..total = Schritte, total+1 = fertig
+  let wakeLock = null;
+  let listening = false;
+  let rec = null;
+  let speaking = false;
+  let closed = false;
+
+  const box = openSheet('<div class="cook"></div>', {
+    full: true,
+    onClose: () => {
+      closed = true;
+      releaseWake();
+      stopListening();
+      if ('speechSynthesis' in window) speechSynthesis.cancel();
+      document.removeEventListener('visibilitychange', onVisible);
+      document.removeEventListener('keydown', onKey);
+    },
+  });
+  box.classList.add('cook-sheet');
+  const root = $('.cook', box);
+
+  /* --- Bildschirm anlassen --- */
+  async function requestWake() {
+    if (!('wakeLock' in navigator) || closed) return;
+    try {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; drawStatus(); });
+    } catch (e) { wakeLock = null; }
+    drawStatus();
+  }
+  function releaseWake() { if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; } }
+  function onVisible() { if (document.visibilityState === 'visible' && !wakeLock) requestWake(); }
+  document.addEventListener('visibilitychange', onVisible);
+
+  /* --- Vorlesen --- */
+  function textFor(i) {
+    if (i === 0) {
+      return `${recipe.name}. Du brauchst: ${recipe.ingredients.filter((x) => !x.optional).map((x) => `${x.qty ? `${x.qty} ` : ''}${x.name}`).join(', ')}.`;
+    }
+    if (i > total) return 'Fertig. Guten Appetit!';
+    const st = steps[i - 1];
+    return `Schritt ${i} von ${total}. ${st.title ? `${st.title}. ` : ''}${st.text}`;
+  }
+  function speak(text) {
+    if (!('speechSynthesis' in window)) { toast('Vorlesen wird hier nicht unterstützt'); return; }
+    speechSynthesis.cancel();
+    // In Sätze teilen – lange Texte werden auf manchen Geräten sonst abgeschnitten
+    const parts = text.match(/[^.!?]+[.!?]*/g) || [text];
+    const voice = speechVoice();
+    speaking = true;
+    pauseListening();
+    parts.forEach((part, n) => {
+      const u = new SpeechSynthesisUtterance(part.trim());
+      u.lang = 'de-DE';
+      if (voice) u.voice = voice;
+      u.rate = 0.95;
+      if (n === parts.length - 1) {
+        u.onend = () => { speaking = false; resumeListening(); };
+        u.onerror = () => { speaking = false; resumeListening(); };
+      }
+      speechSynthesis.speak(u);
+    });
+  }
+  function stopSpeaking() {
+    if ('speechSynthesis' in window) speechSynthesis.cancel();
+    speaking = false;
+    resumeListening();
+  }
+
+  /* --- Sprachsteuerung --- */
+  function handleCommand(raw) {
+    const t = raw.toLowerCase();
+    if (/(weiter|nächste|naechste|next)/.test(t)) go(1);
+    else if (/(zurück|zurueck|vorherige|vorher)/.test(t)) go(-1);
+    else if (/(wiederhol|nochmal|noch mal|vorlesen|lies)/.test(t)) speak(textFor(idx));
+    else if (/(zutaten)/.test(t)) { idx = 0; draw(); if (state.cook.autoRead) speak(textFor(idx)); }
+    else if (/(stopp|stop|ruhe|still)/.test(t)) stopSpeaking();
+  }
+  function startRec() {
+    if (!rec || !listening || speaking || closed) return;
+    try { rec.start(); } catch (e) { /* läuft bereits */ }
+  }
+  function startListening() {
+    if (!SpeechRec) return;
+    rec = new SpeechRec();
+    rec.lang = 'de-DE';
+    rec.continuous = true;
+    rec.interimResults = false;
+    rec.onresult = (e) => {
+      const res = e.results[e.results.length - 1];
+      if (res && res.isFinal) handleCommand(res[0].transcript);
+    };
+    rec.onerror = (e) => {
+      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+        toast('Kein Zugriff aufs Mikrofon');
+        listening = false;
+        drawStatus();
+      }
+    };
+    rec.onend = () => { if (listening && !speaking && !closed) setTimeout(startRec, 250); };
+    listening = true;
+    startRec();
+    drawStatus();
+  }
+  function stopListening() {
+    listening = false;
+    if (rec) { try { rec.abort(); } catch (e) { /* ignore */ } rec = null; }
+    drawStatus();
+  }
+  function pauseListening() { if (rec && listening) { try { rec.abort(); } catch (e) { /* ignore */ } } }
+  function resumeListening() { if (listening) setTimeout(startRec, 300); }
+
+  /* --- Navigation --- */
+  function go(delta) {
+    const next = Math.min(total + 1, Math.max(0, idx + delta));
+    if (next === idx) return;
+    idx = next;
+    draw();
+    if (state.cook.autoRead) speak(textFor(idx));
+    else stopSpeaking();
+  }
+  function onKey(e) {
+    if (e.key === 'ArrowRight') go(1);
+    else if (e.key === 'ArrowLeft') go(-1);
+  }
+  document.addEventListener('keydown', onKey);
+
+  function drawStatus() {
+    const el = $('.cook-status', root);
+    if (!el) return;
+    const bits = [];
+    bits.push('wakeLock' in navigator
+      ? (wakeLock ? '🔆 Bildschirm bleibt an' : '🔅 Bildschirm-An nicht aktiv')
+      : '🔅 Bildschirm-An wird hier nicht unterstützt');
+    if (listening) bits.push('🎤 Sag „weiter“, „zurück“, „wiederholen“ oder „stopp“');
+    el.textContent = bits.join(' · ');
+    const mic = $('[data-mic]', root);
+    if (mic) mic.classList.toggle('on', listening);
+    const rd = $('[data-read]', root);
+    if (rd) rd.classList.toggle('on', state.cook.autoRead);
+  }
+
+  function body() {
+    if (idx === 0) {
+      return `
+        <div class="cook-kicker">Bereitlegen</div>
+        <h2 class="cook-step-title">Zutaten</h2>
+        <ul class="cook-ings">
+          ${recipe.ingredients.map((i) => `<li class="${i.optional ? 'opt' : ''}"><span>${esc(i.name)}${i.optional ? ' <small>(optional)</small>' : ''}</span><span class="qty">${esc(i.qty)}</span></li>`).join('')}
+        </ul>`;
+    }
+    if (idx > total) {
+      return `
+        <div class="cook-done">
+          <div class="empty-ico">🍽️</div>
+          <h2 class="cook-step-title">Guten Appetit!</h2>
+          ${recipe.tip ? `<div class="tip-box">💡 <span>${esc(recipe.tip)}</span></div>` : ''}
+          <button class="btn primary wide" data-finish>Kochmodus beenden</button>
+        </div>`;
+    }
+    const st = steps[idx - 1];
+    return `
+      <div class="cook-kicker">Schritt ${idx} von ${total}</div>
+      ${st.title ? `<h2 class="cook-step-title">${esc(st.title)}</h2>` : ''}
+      <p class="cook-text">${esc(st.text)}</p>`;
+  }
+
+  function draw() {
+    const pct = Math.round((idx / (total + 1)) * 100);
+    root.innerHTML = `
+      <div class="cook-top">
+        <button class="icon-btn" data-close aria-label="Beenden">✕</button>
+        <div class="cook-name">${esc(recipe.name)}</div>
+        <button class="icon-btn toggle" data-read aria-label="Automatisch vorlesen" title="Jeden Schritt automatisch vorlesen">🔊</button>
+        ${SpeechRec ? '<button class="icon-btn toggle" data-mic aria-label="Sprachsteuerung" title="Sprachsteuerung">🎤</button>' : ''}
+      </div>
+      <div class="cook-progress"><div style="width:${pct}%"></div></div>
+      <div class="cook-body">${body()}</div>
+      <div class="cook-nav">
+        <button class="btn ghost cook-btn" data-prev ${idx === 0 ? 'disabled' : ''}>‹ Zurück</button>
+        <button class="icon-btn cook-say" data-say aria-label="Diesen Schritt vorlesen">🗣️</button>
+        <button class="btn primary cook-btn" data-next ${idx > total ? 'disabled' : ''}>${idx === 0 ? 'Los geht’s ›' : idx === total ? 'Fertig ›' : 'Weiter ›'}</button>
+      </div>
+      <div class="cook-status"></div>`;
+    drawStatus();
+  }
+
+  root.addEventListener('click', (e) => {
+    const t = e.target;
+    if (t.closest('[data-close]') || t.closest('[data-finish]')) closeSheet();
+    else if (t.closest('[data-prev]')) go(-1);
+    else if (t.closest('[data-next]')) go(1);
+    else if (t.closest('[data-say]')) { if (speaking) stopSpeaking(); else speak(textFor(idx)); }
+    else if (t.closest('[data-read]')) {
+      state.cook.autoRead = !state.cook.autoRead;
+      save();
+      drawStatus();
+      toast(state.cook.autoRead ? 'Schritte werden automatisch vorgelesen' : 'Automatisches Vorlesen aus');
+      if (state.cook.autoRead) speak(textFor(idx)); else stopSpeaking();
+    } else if (t.closest('[data-mic]')) {
+      if (listening) { stopListening(); toast('Sprachsteuerung aus'); } else { startListening(); toast('Sprachsteuerung an'); }
+    }
+  });
+
+  // Wischen: nach links = weiter, nach rechts = zurück
+  let sx = 0; let sy = 0;
+  root.addEventListener('touchstart', (e) => { sx = e.touches[0].clientX; sy = e.touches[0].clientY; }, { passive: true });
+  root.addEventListener('touchend', (e) => {
+    const dx = e.changedTouches[0].clientX - sx;
+    const dy = e.changedTouches[0].clientY - sy;
+    if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5) go(dx < 0 ? 1 : -1);
+  }, { passive: true });
+
+  if ('speechSynthesis' in window) speechSynthesis.getVoices(); // Stimmen vorladen
+  draw();
+  requestWake();
+  if (state.cook.autoRead) speak(textFor(idx));
 }
 
 /* ================= Rezept: zur Liste hinzufügen ================= */
 
-function openAddRecipeSheet(recipe) {
+function openAddRecipeSheet(recipe, onAdded) {
   const box = openSheet(`
     <h2>${esc(recipe.name)}</h2>
     <label class="field"><span>Zu Liste hinzufügen</span>
@@ -643,6 +936,7 @@ function openAddRecipeSheet(recipe) {
     save();
     closeSheet();
     render();
+    if (onAdded) onAdded();
     toast(`${chosen.length} Artikel zu „${list.name}“ hinzugefügt`);
   };
 }
@@ -666,9 +960,23 @@ function ingredientRow(i = { name: '', qty: '', optional: false }) {
     </div>`;
 }
 
-function openRecipeEditor(type, recipe = null) {
+function stepRow(st = { title: '', text: '' }) {
+  return `
+    <div class="step-row">
+      <div class="step-head">
+        <span class="step-no"></span>
+        <input class="input" name="stitle" placeholder="Kurztitel (optional)" value="${esc(st.title)}" autocomplete="off">
+        <button type="button" class="icon-btn" data-sup aria-label="Nach oben">↑</button>
+        <button type="button" class="icon-btn" data-sdown aria-label="Nach unten">↓</button>
+        <button type="button" class="icon-btn" data-sdel aria-label="Schritt entfernen">✕</button>
+      </div>
+      <textarea class="input step-text" name="stext" rows="3" placeholder="Was ist in diesem Schritt zu tun?">${esc(st.text)}</textarea>
+    </div>`;
+}
+
+function openRecipeEditor(type, recipe = null, { onSaved, onDeleted } = {}) {
   const isNew = !recipe;
-  const r = recipe || { type, name: '', duration: null, ingredients: [] };
+  const r = recipe || { type, name: '', duration: null, ingredients: [], steps: [], tip: '' };
   const box = openSheet(`
     <form class="editor">
       <h2>${isNew ? (type === 'recipe' ? 'Neues Gericht' : 'Neuer Standardeinkauf') : 'Bearbeiten'}</h2>
@@ -682,6 +990,13 @@ function openRecipeEditor(type, recipe = null) {
       <p class="muted small-text">„optional“ = beim Hinzufügen zunächst nicht ausgewählt.</p>
       <div class="ing-rows">${r.ingredients.map(ingredientRow).join('')}</div>
       <button type="button" class="btn ghost wide" data-addrow>＋ ${type === 'recipe' ? 'Zutat' : 'Artikel'} hinzufügen</button>
+      ${type === 'recipe' ? `
+      <h3>Zubereitung</h3>
+      <p class="muted small-text">Ein Schritt pro Feld, in der Reihenfolge des Kochens. Mit ↑↓ verschieben.</p>
+      <div class="step-rows">${(r.steps || []).map(stepRow).join('')}</div>
+      <button type="button" class="btn ghost wide" data-addstep>＋ Schritt hinzufügen</button>
+      <label class="field tip-field"><span>Tipp (optional)</span>
+        <textarea class="input" name="tip" rows="2" placeholder="z. B. lässt sich gut einfrieren">${esc(r.tip || '')}</textarea></label>` : ''}
       <div class="btn-row sticky">
         ${isNew ? '' : '<button type="button" class="btn danger" data-delete>Löschen</button>'}
         <button type="button" class="btn ghost" data-x>Abbrechen</button>
@@ -717,6 +1032,23 @@ function openRecipeEditor(type, recipe = null) {
       else $('input[name=name]', row.nextElementSibling).focus();
     }
   });
+  const steps = $('.step-rows', box);
+  if (steps) {
+    $('[data-addstep]', box).onclick = () => {
+      steps.insertAdjacentHTML('beforeend', stepRow());
+      $('textarea', steps.lastElementChild).focus();
+    };
+    steps.addEventListener('click', (e) => {
+      const row = e.target.closest('.step-row');
+      if (!row) return;
+      if (e.target.closest('[data-sdel]')) row.remove();
+      else if (e.target.closest('[data-sup]') && row.previousElementSibling) row.parentNode.insertBefore(row, row.previousElementSibling);
+      else if (e.target.closest('[data-sdown]') && row.nextElementSibling) row.parentNode.insertBefore(row.nextElementSibling, row);
+    });
+    steps.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && e.target.name === 'stitle') { e.preventDefault(); $('textarea', e.target.closest('.step-row')).focus(); }
+    });
+  }
   $('[data-x]', box).onclick = () => closeSheet();
   const delBtn = $('[data-delete]', box);
   if (delBtn) {
@@ -724,7 +1056,7 @@ function openRecipeEditor(type, recipe = null) {
       if (!(await confirmDialog(`„${r.name}“ wirklich löschen?`, 'Löschen', true))) return;
       state.recipes = state.recipes.filter((x) => x.id !== r.id);
       save();
-      closeSheet();
+      closeSheet(onDeleted ? 2 : 1);
       render();
     };
   }
@@ -748,14 +1080,24 @@ function openRecipeEditor(type, recipe = null) {
       };
     }).filter(Boolean);
     const duration = f.duration && f.duration.value !== '' ? Math.max(0, parseInt(f.duration.value, 10) || 0) : null;
+    const extra = {};
+    if (steps) {
+      extra.steps = $$('.step-row', steps).map((row) => ({
+        id: uid(),
+        title: $('[name=stitle]', row).value.trim(),
+        text: $('[name=stext]', row).value.trim(),
+      })).filter((x) => x.title || x.text);
+      extra.tip = f.tip.value.trim();
+    }
     if (isNew) {
-      state.recipes.push({ id: uid(), type, name, duration, lastAdded: null, ingredients });
+      state.recipes.push({ id: uid(), type, name, duration, lastAdded: null, ingredients, steps: [], tip: '', ...extra });
     } else {
-      Object.assign(r, { name, duration, ingredients });
+      Object.assign(r, { name, duration, ingredients, ...extra });
     }
     save();
     closeSheet();
     render();
+    if (onSaved) onSaved();
     toast('Gespeichert');
   };
   if (isNew) setTimeout(() => $('input[name=rname]', box).focus(), 250);
@@ -984,6 +1326,11 @@ main.addEventListener('click', async (e) => {
     case 'addRecipe': {
       const r = state.recipes.find((x) => x.id === rowId);
       if (r) openAddRecipeSheet(r);
+      break;
+    }
+    case 'viewRecipe': {
+      const r = state.recipes.find((x) => x.id === rowId);
+      if (r) openRecipeView(r);
       break;
     }
     case 'editRecipe': {
