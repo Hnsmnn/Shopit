@@ -39,6 +39,7 @@ function defaultState() {
     suggestHidden: [], // vom Nutzer entfernte Vorschläge (nicht wieder automatisch aufnehmen)
     suggestAuto: true, // neue Artikel automatisch als Vorschlag übernehmen
     packs: [], // bereits importierte Rezeptsammlungen
+    backup: { lastAt: 0, since: Date.now(), intervalDays: 7, snoozeUntil: 0 },
   };
 }
 
@@ -85,6 +86,7 @@ function normalizeState(s) {
   if (!Array.isArray(st.packs)) st.packs = [];
   if (!Array.isArray(st.suggestHidden)) st.suggestHidden = [];
   if (typeof st.suggestAuto !== 'boolean') st.suggestAuto = true;
+  st.backup = { ...d.backup, ...(st.backup || {}) };
   importPacks(st);
   if (!Array.isArray(st.suggestions)) {
     // Erstbefüllung aus allen bekannten Artikeln und Zutaten
@@ -318,6 +320,92 @@ document.addEventListener('focusin', (e) => {
   }
 });
 
+/* ================= Backup ================= */
+// Backup als Datei: über das Teilen-Menü (z. B. Google Drive) oder als Download.
+// Eine Web-App darf nicht still im Hintergrund Dateien schreiben – deshalb
+// erinnert die App nach dem eingestellten Intervall und sichert mit einem Tipp.
+
+const DAY = 86400000;
+
+function backupDue(now = Date.now()) {
+  const b = state.backup;
+  if (!b.intervalDays) return false;
+  if (now < (b.snoozeUntil || 0)) return false;
+  return now - Math.max(b.lastAt || 0, b.since || 0) >= b.intervalDays * DAY;
+}
+
+function backupFile() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const name = `shopit-backup-${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}.txt`;
+  // .txt statt .json: Chrome auf Android teilt nur bestimmte Dateitypen
+  return new File([JSON.stringify(state, null, 1)], name, { type: 'text/plain' });
+}
+
+function markBackupDone() {
+  state.backup.lastAt = Date.now();
+  state.backup.snoozeUntil = 0;
+  save();
+  render();
+}
+
+function downloadBackup() {
+  const file = backupFile();
+  const url = URL.createObjectURL(file);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = file.name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+  markBackupDone();
+  toast('Backup wird heruntergeladen (Ordner „Downloads“)');
+}
+
+async function shareBackup() {
+  const file = backupFile();
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file], title: 'Shopit-Backup' });
+      markBackupDone();
+      toast('Backup gesichert ✓');
+    } catch (err) {
+      if (err && err.name === 'AbortError') return; // abgebrochen
+      downloadBackup();
+    }
+  } else {
+    downloadBackup();
+  }
+}
+
+function relAgo(ts) {
+  if (!ts) return 'noch nie';
+  const days = Math.floor((Date.now() - ts) / DAY);
+  if (days <= 0) return 'heute';
+  if (days === 1) return 'gestern';
+  return `vor ${days} Tagen`;
+}
+
+function renderBackupBanner() {
+  if (!backupDue()) return '';
+  return `
+    <div class="banner">
+      <div class="banner-text"><b>Backup fällig</b><span>Letztes Backup: ${relAgo(state.backup.lastAt)}</span></div>
+      <button class="btn ghost small" data-act="backupLater">Später</button>
+      <button class="btn primary small" data-act="backupNow">Jetzt sichern</button>
+    </div>`;
+}
+
+function restoreFromText(text) {
+  const parsed = JSON.parse(text);
+  if (!parsed || !Array.isArray(parsed.lists)) throw new Error('invalid');
+  const keepBackup = state.backup;
+  state = normalizeState(parsed);
+  state.backup = { ...keepBackup, lastAt: Date.now(), snoozeUntil: 0 };
+  commit();
+}
+
 /* ================= Rendering ================= */
 
 const TITLES = { list: 'Einkaufsliste', recipe: 'Gerichte', standard: 'Standardeinkäufe', settings: 'Mehr' };
@@ -331,9 +419,10 @@ function render() {
   $('#title').textContent = TITLES[ui.view];
   $$('.tabbar button').forEach((b) => b.classList.toggle('active', b.dataset.view === ui.view));
   const main = $('#main');
-  if (ui.view === 'list') main.innerHTML = renderListView();
+  const banner = ui.view === 'settings' ? '' : renderBackupBanner();
+  if (ui.view === 'list') main.innerHTML = banner + renderListView();
   else if (ui.view === 'settings') main.innerHTML = renderSettings();
-  else main.innerHTML = renderRecipeView(ui.view);
+  else main.innerHTML = banner + renderRecipeView(ui.view);
 
   if (focusId) {
     const el = document.getElementById(focusId);
@@ -489,9 +578,20 @@ function renderSettings() {
     </section>
     <section class="panel">
       <h2>Datensicherung</h2>
-      <p class="muted">Deine Daten liegen nur auf diesem Handy. Mit einem Backup kannst du sie sichern oder auf ein neues Handy übertragen.</p>
-      <button class="btn ghost wide" data-act="backupExport">Backup in Zwischenablage kopieren</button>
-      <button class="btn ghost wide" data-act="backupImport">Backup wiederherstellen</button>
+      <p class="muted">Deine Daten liegen nur auf diesem Handy. Sichere sie regelmäßig als Datei – am besten in Google Drive –, damit nichts verloren geht, wenn Browserdaten gelöscht werden oder du das Handy wechselst.</p>
+      <p class="backup-status ${backupDue() ? 'due' : ''}">Letztes Backup: <b>${relAgo(state.backup.lastAt)}</b></p>
+      <button class="btn primary wide" data-act="backupNow">Backup jetzt sichern (Teilen, z. B. Drive)</button>
+      <button class="btn ghost wide" data-act="backupDownload">Backup als Datei herunterladen</button>
+      <label class="field reminder"><span>Erinnerung an Backup</span>
+        <select class="input" data-backup-interval>
+          ${[[0, 'Aus'], [3, 'alle 3 Tage'], [7, 'jede Woche'], [14, 'alle 2 Wochen'], [30, 'jeden Monat']]
+            .map(([v, l]) => `<option value="${v}" ${state.backup.intervalDays === v ? 'selected' : ''}>${l}</option>`).join('')}
+        </select></label>
+      <h3 class="subhead">Wiederherstellen</h3>
+      <label class="btn ghost wide file-btn">Backup aus Datei laden
+        <input type="file" accept=".txt,.json,text/plain,application/json" data-restore-file hidden></label>
+      <button class="btn ghost wide" data-act="backupImport">Backup-Text einfügen</button>
+      <button class="btn ghost wide" data-act="backupExport">Backup als Text kopieren</button>
     </section>
     ${isStandalone() ? '' : `
     <section class="panel">
@@ -805,6 +905,25 @@ main.addEventListener('submit', (e) => {
 });
 
 main.addEventListener('change', async (e) => {
+  if (e.target.matches('[data-backup-interval]')) {
+    state.backup.intervalDays = Number(e.target.value);
+    state.backup.snoozeUntil = 0;
+    commit();
+    return;
+  }
+  if (e.target.matches('[data-restore-file]')) {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    if (!(await confirmDialog(`„${file.name}“ wiederherstellen? Alle aktuellen Daten werden ersetzt.`, 'Wiederherstellen', true))) return;
+    try {
+      restoreFromText(await file.text());
+      toast('Backup wiederhergestellt');
+    } catch (err) {
+      toast('Diese Datei ist kein gültiges Shopit-Backup');
+    }
+    return;
+  }
   if (e.target.id === 'listSelect') {
     const v = e.target.value;
     if (v === '__new') {
@@ -907,6 +1026,13 @@ main.addEventListener('click', async (e) => {
       commit();
       break;
     }
+    case 'backupNow': await shareBackup(); break;
+    case 'backupDownload': downloadBackup(); break;
+    case 'backupLater':
+      state.backup.snoozeUntil = Date.now() + DAY;
+      commit();
+      toast('Erinnerung morgen wieder');
+      break;
     case 'backupExport': {
       const data = JSON.stringify(state);
       try {
@@ -931,10 +1057,7 @@ main.addEventListener('click', async (e) => {
       });
       if (!text) return;
       try {
-        const parsed = JSON.parse(text);
-        if (!parsed || !Array.isArray(parsed.lists)) throw new Error('invalid');
-        state = normalizeState(parsed);
-        commit();
+        restoreFromText(text);
         toast('Backup wiederhergestellt');
       } catch (err) {
         toast('Ungültiges Backup');
