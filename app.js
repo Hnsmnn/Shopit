@@ -542,6 +542,7 @@ function renderRecipeView(type) {
 
   return `
     <input id="search-${type}" class="input search" type="search" placeholder="Suchen…" value="${esc(ui.search[type])}" data-search="${type}">
+    ${type === 'recipe' ? '<button class="btn ghost wide import-btn" data-act="importRecipe">🌐 Rezept von Website importieren</button>' : ''}
     <div class="segmented">
       ${sortKeys(type).map((k) => `<button data-sort="${k}" class="${k === sort ? 'active' : ''}">${SORTS[k].label}</button>`).join('')}
     </div>
@@ -616,8 +617,92 @@ function renderSettings() {
       <b>Android (Chrome):</b> Menü ⋮ → „App installieren“ bzw. „Zum Startbildschirm hinzufügen“.</p>
       <p class="muted">Danach startet Shopit wie eine normale App und funktioniert auch offline.</p>
     </section>`}
-    <p class="muted center">Shopit 2.1</p>
+    <p class="muted center">Shopit 2.2</p>
   `;
+}
+
+/* ================= Rezept importieren ================= */
+
+function hostOf(url) {
+  try { return new URL(url).hostname.replace(/^www\./, ''); } catch (e) { return url; }
+}
+
+function openImportDialog(initialUrl = '') {
+  openDialog(`
+    <h3>Rezept importieren</h3>
+    <p class="muted">Adresse der Rezeptseite einfügen – z. B. von Chefkoch, Lecker oder einem Foodblog.</p>
+    <form data-urlform novalidate>
+      <input class="input" name="url" type="text" inputmode="url" autocapitalize="off" spellcheck="false" placeholder="https://…" value="${esc(initialUrl)}" autocomplete="off">
+      <p class="import-status muted" hidden></p>
+      <div class="btn-row">
+        <button type="button" class="btn ghost" data-x>Abbrechen</button>
+        <button class="btn primary" data-load>Laden</button>
+      </div>
+      <button type="button" class="link-btn" data-paste>Klappt nicht? Rezepttext einfügen</button>
+    </form>`, (box, done) => {
+    const form = $('form', box);
+    const status = $('.import-status', box);
+    const input = form.url;
+    let busy = false;
+    setTimeout(() => { if (!input.value) input.focus(); }, 50);
+    $('[data-x]', box).onclick = () => done(null);
+    $('[data-paste]', box).onclick = () => { done(null); openPasteDialog(firstUrl(input.value)); };
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      if (busy) return;
+      const url = firstUrl(input.value) || (/^[\w.-]+\.[a-z]{2,}\//i.test(input.value.trim()) ? `https://${input.value.trim()}` : '');
+      if (!url) { status.hidden = false; status.textContent = 'Bitte eine gültige Adresse eingeben.'; return; }
+      busy = true;
+      $('[data-load]', box).disabled = true;
+      status.hidden = false;
+      status.textContent = '⏳ Rezept wird geladen …';
+      try {
+        const html = await fetchRecipePage(url);
+        const recipe = parseRecipeHtml(html, url);
+        if (!recipe) throw new Error('kein Rezept');
+        done(true);
+        openRecipeEditor('recipe', null, { prefill: recipe });
+      } catch (err) {
+        busy = false;
+        $('[data-load]', box).disabled = false;
+        status.textContent = err && err.message === 'kein Rezept'
+          ? 'Auf dieser Seite wurde kein Rezept erkannt. Du kannst den Rezepttext stattdessen einfügen.'
+          : 'Die Seite konnte nicht geladen werden. Versuch es nochmal oder füge den Rezepttext ein.';
+      }
+    };
+  });
+}
+
+function openPasteDialog(url = '') {
+  openDialog(`
+    <h3>Rezepttext einfügen</h3>
+    <p class="muted">Auf der Webseite das ganze Rezept markieren (Titel, Zutaten, Zubereitung), kopieren und hier einfügen.</p>
+    <textarea class="input paste-area" placeholder="Rezept hier einfügen"></textarea>
+    <div class="btn-row">
+      <button class="btn ghost" data-x>Abbrechen</button>
+      <button class="btn primary" data-ok>Übernehmen</button>
+    </div>`, (box, done) => {
+    setTimeout(() => $('textarea', box).focus(), 50);
+    $('[data-x]', box).onclick = () => done(null);
+    $('[data-ok]', box).onclick = () => {
+      const text = $('textarea', box).value;
+      if (!text.trim()) return;
+      done(true);
+      openRecipeEditor('recipe', null, { prefill: parseRecipeText(text, url) });
+    };
+  });
+}
+
+// Geteilte Links (Android: Teilen → Shopit) beim Start übernehmen
+function handleSharedLink() {
+  const params = new URLSearchParams(location.search);
+  if (!params.has('url') && !params.has('text') && !params.has('title')) return;
+  const url = firstUrl(params.get('url')) || firstUrl(params.get('text')) || firstUrl(params.get('title'));
+  history.replaceState(null, '', location.pathname);
+  if (!url) return;
+  ui.view = 'recipe';
+  render();
+  openImportDialog(url);
 }
 
 /* ================= Rezept ansehen ================= */
@@ -648,6 +733,7 @@ function openRecipeView(recipe) {
         ${steps.map((st) => `<li>${st.title ? `<b>${esc(st.title)}</b>` : ''}${st.text ? `<span>${esc(st.text)}</span>` : ''}</li>`).join('')}
       </ol>` : '<p class="muted">Noch keine Schritte hinterlegt. Tippe auf „Bearbeiten“, um sie hinzuzufügen.</p>'}
       ${r.tip ? `<div class="tip-box">💡 <span>${esc(r.tip)}</span></div>` : ''}
+      ${r.source ? `<p class="source-link">Quelle: <a href="${esc(r.source)}" target="_blank" rel="noopener noreferrer">${esc(hostOf(r.source))} ↗</a></p>` : ''}
       <div class="btn-row sticky">
         <button class="btn ghost" data-edit>✎ Bearbeiten</button>
         <button class="btn primary" data-x>Schließen</button>
@@ -974,12 +1060,15 @@ function stepRow(st = { title: '', text: '' }) {
     </div>`;
 }
 
-function openRecipeEditor(type, recipe = null, { onSaved, onDeleted } = {}) {
+function openRecipeEditor(type, recipe = null, { onSaved, onDeleted, prefill } = {}) {
   const isNew = !recipe;
-  const r = recipe || { type, name: '', duration: null, ingredients: [], steps: [], tip: '' };
+  const r = recipe || {
+    type, name: '', duration: null, ingredients: [], steps: [], tip: '', source: '', ...(prefill || {}),
+  };
   const box = openSheet(`
     <form class="editor">
-      <h2>${isNew ? (type === 'recipe' ? 'Neues Gericht' : 'Neuer Standardeinkauf') : 'Bearbeiten'}</h2>
+      <h2>${prefill ? 'Importiertes Rezept prüfen' : isNew ? (type === 'recipe' ? 'Neues Gericht' : 'Neuer Standardeinkauf') : 'Bearbeiten'}</h2>
+      ${prefill ? `<p class="muted small-text">Bitte kurz prüfen: Namen, Mengen und welche Zutaten optional sind. ${prefill.source ? `Quelle: ${esc(hostOf(prefill.source))}` : ''}</p>` : ''}
       <label class="field"><span>Name</span>
         <input class="input" name="rname" value="${esc(r.name)}" required autocomplete="off"
           placeholder="${type === 'recipe' ? 'z. B. Gemüsecurry' : 'z. B. Grillabend'}"></label>
@@ -1009,7 +1098,7 @@ function openRecipeEditor(type, recipe = null, { onSaved, onDeleted } = {}) {
     rows.insertAdjacentHTML('beforeend', ingredientRow());
     if (focus) $('input[name=name]', rows.lastElementChild).focus();
   };
-  if (isNew) addRow(false);
+  if (isNew && !r.ingredients.length) addRow(false);
 
   $('[data-addrow]', box).onclick = () => addRow(true);
   rows.addEventListener('click', (e) => {
@@ -1090,7 +1179,7 @@ function openRecipeEditor(type, recipe = null, { onSaved, onDeleted } = {}) {
       extra.tip = f.tip.value.trim();
     }
     if (isNew) {
-      state.recipes.push({ id: uid(), type, name, duration, lastAdded: null, ingredients, steps: [], tip: '', ...extra });
+      state.recipes.push({ id: uid(), type, name, duration, lastAdded: null, ingredients, steps: [], tip: '', source: r.source || '', ...extra });
     } else {
       Object.assign(r, { name, duration, ingredients, ...extra });
     }
@@ -1339,6 +1428,7 @@ main.addEventListener('click', async (e) => {
       break;
     }
     case 'newRecipe': openRecipeEditor(ui.view); break;
+    case 'importRecipe': openImportDialog(); break;
     case 'catUp':
     case 'catDown': {
       const idx = state.categories.findIndex((c) => c.id === rowId);
@@ -1417,6 +1507,7 @@ main.addEventListener('click', async (e) => {
 
 save(); // Migrationen (z. B. importierte Rezepte) direkt sichern
 render();
+handleSharedLink();
 
 // Offline-Unterstützung
 if ('serviceWorker' in navigator) {

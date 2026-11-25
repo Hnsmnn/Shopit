@@ -330,3 +330,11 @@ main { padding: 12px 16px calc(96px + var(--bottom)); max-width: 640px; margin: 
 .cook-btn { flex: 1; min-height: 64px; font-size: 19px; border-radius: 16px; }
 .cook-say { width: 56px; height: 56px; flex: 0 0 56px; font-size: 24px; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; }
 .cook-status { text-align: center; font-size: 12px; color: var(--muted); padding-top: 8px; min-height: 18px; }
+
+/* Import */
+.import-btn { margin: 0 0 10px; }
+.import-status { margin: 10px 0 0; }
+.link-btn { background: none; border: 0; color: var(--accent); font-weight: 600; padding: 12px 0 0; width: 100%; text-align: center; font-size: 15px; }
+.paste-area { min-height: 200px; font-size: 16px; }
+.source-link { margin: 14px 0 0; font-size: 14px; color: var(--muted); }
+.source-link a { color: var(--accent); }

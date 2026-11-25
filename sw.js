@@ -1,9 +1,9 @@
 // Shopit offline support.
 // App-Dateien: zuerst Netzwerk (damit Updates automatisch ankommen),
 // ohne Verbindung aus dem Cache.
-const CACHE = 'shopit-v3';
+const CACHE = 'shopit-v4';
 const ASSETS = [
-  './', './index.html', './style.css', './categories.js', './recipes-vegan.js', './app.js',
+  './', './index.html', './style.css', './categories.js', './recipes-vegan.js', './import.js', './app.js',
   './manifest.webmanifest', './icon.svg', './icon-192.png', './icon-512.png', './apple-touch-icon.png',
 ];
 const NETWORK_TIMEOUT = 3500;
