@@ -617,7 +617,7 @@ function renderSettings() {
       <b>Android (Chrome):</b> Menü ⋮ → „App installieren“ bzw. „Zum Startbildschirm hinzufügen“.</p>
       <p class="muted">Danach startet Shopit wie eine normale App und funktioniert auch offline.</p>
     </section>`}
-    <p class="muted center">Shopit 2.3.1</p>
+    <p class="muted center">Shopit 2.3.2</p>
   `;
 }
 

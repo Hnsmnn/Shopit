@@ -233,6 +233,36 @@ function stripRecipeNoise(line) {
 const ING_HEAD_RE = /^(?:\S{1,2}\s+)?(zutaten|zutatenliste|einkaufsliste|das brauchst du|du brauchst|was du brauchst|ingredients|you need)\b/i;
 const STEP_HEAD_RE = /^(?:\S{1,2}\s+)?(zubereitung|anleitung|so geht'?s|so wird'?s gemacht|so gehts|schritte|arbeitsschritte|und so geht'?s|instructions|directions|method|preparation)\b/i;
 
+// Nährwerte gehören nicht zum Rezept ("Pro Portion: 450 kcal, 20 g Protein")
+const NUTRI_HEAD_RE = /^(?:\S{1,2}\s+)?(nährwerte?|nährwertangaben|makros|macros|nutrition|kalorien|pro portion\s*:?$|per serving)/i;
+const NUTRI_WORD = '(?:kcal|kalorien|cal|kj|protein|proteine|eiweiß|eiweiss|fett|fette|fat|kohlenhydrate|kh|carbs|ballaststoffe|zucker|sugar)';
+const NUTRI_RE = new RegExp(`\\d+[.,]?\\d*\\s*(?:g\\s*)?${NUTRI_WORD}\\b|\\b${NUTRI_WORD}\\s*:?\\s*(?:ca\\.?\\s*)?\\d`, 'i');
+// "200 g Zucker" ist eine Zutat: Zucker/Fett zählen nur zusammen mit anderen Angaben
+const NUTRI_STRONG_RE = /\d\s*(kcal|kj)\b|\b(kalorien|protein|proteine|eiweiß|eiweiss|kohlenhydrate|kh|carbs|ballaststoffe)\b/i;
+const isNutritionLine = (l) => {
+  const hits = (l.match(new RegExp(NUTRI_RE.source, 'gi')) || []).length;
+  return hits >= 2 || (hits === 1 && l.length < 45 && NUTRI_STRONG_RE.test(l));
+};
+const TIP_HEAD_RE = /^(?:\S{1,2}\s+)?(?:mein\s+|unser\s+|pro-?)?(tipps?|tip|hinweis|variante|variation|serviervorschlag)\b\s*:?\s*/i;
+const PORTION_RE = /^(?:für\s+|ergibt\s+|reicht für\s+|portionen\s*:?\s*)?(?:ca\.?\s*)?\d+\s*(?:-\s*\d+\s*)?(?:portionen|personen|pers\.|stück|servings?)\b[^.]{0,30}$/i;
+// Sätze, die nicht zur Zubereitung gehören (Aufrufe, Grüße, Werbung)
+const FILLER_RE = new RegExp([
+  '\\bfolg(e|t)\\s+(mir|uns)', '\\bspeicher(e|t|n)?\\b.*\\b(rezept|post|beitrag|video|später)', '\\bspeichern nicht vergessen',
+  '\\bteil(e|t)\\b.*\\b(rezept|post|beitrag|video|freund)', '\\bmarkier(e|t)\\b', '\\bkommentar', '\\bkommentier',
+  '\\blink\\s+(ist\\s+)?(in|im)\\s+(der\\s+|meiner\\s+)?bio', '\\blikes?\\b', '\\bguten appetit', '\\bviel spaß\\b',
+  '\\blass(t)?\\s+(es\\s+)?(euch|dir)s?\\s+schmecken', '\\b(werbung|anzeige|gesponsert|sponsored|kooperation)\\b',
+  '\\babonnier', '\\bmehr rezepte\\b', '\\bnachkochen\\b', '\\bausprobier', '\\bfollow\\b', '\\bsave (this|for later)',
+  '\\b(rezept|idee|inspiration)\\s+(von|by|inspiriert)', '\\bcredits?\\b', '\\bmein (kochbuch|e-?book)', '\\brabatt|\\bcode\\b',
+  '\\bschreib(t)?\\s+(mir|uns)', '\\b(lieblings|absolutes?)\\s*rezept', '\\bso lecker\\b', '\\bmega lecker\\b',
+].join('|'), 'i');
+const isFiller = (sentence) => FILLER_RE.test(sentence) || /\?\s*$/.test(sentence);
+
+// Füllsätze aus einem Schritt entfernen; leerer Rest = kein Schritt
+function cleanStepText(t) {
+  const sentences = t.match(/[^.!?]+(?:[.!?]+(?=\s|$)|$)/g) || [t];
+  return sentences.map((x) => x.trim()).filter((x) => x && !isFiller(x)).join(' ').trim();
+}
+
 function findDuration(text) {
   const t = String(text || '');
   let m = t.match(/(?:zubereitungszeit|gesamtzeit|arbeitszeit|kochzeit|dauer|zeit|in\s+nur|fertig\s+in|time)\s*:?\s*(?:ca\.?\s*)?(\d{1,2})\s*(?:std\.?|stunden?|h)\b(?:\s*(\d{1,2})\s*min)?/i);
@@ -258,9 +288,15 @@ function parseRecipeText(text, sourceUrl = '', { fromPhoto = false } = {}) {
   const steps = [];
   let mode = 'head';
   let headDone = false;
+  const tips = [];
+  let numberedSteps = 0;
+  let afterSteps = false; // nach nummerierten Schritten folgt meist nur noch Abschlusstext
   let stepStart = false; // neuer Schritt beginnt (Nummer/Aufzählung oder Leerzeile)
   const addStep = (l) => {
     const numbered = /^(schritt\s*)?\d{1,2}[.):]\s*/i.test(l);
+    if (numbered) { numberedSteps += 1; afterSteps = false; }
+    else if (stepStart && numberedSteps >= 2) afterSteps = true;
+    if (afterSteps) return;
     const t = l.replace(/^(schritt\s*)?\d{1,2}[.):]\s*/i, '').replace(/^schritt\s*\d{1,2}\s+/i, '');
     if (t.length < 3) { stepStart = true; return; }
     const last = steps[steps.length - 1];
@@ -274,8 +310,24 @@ function parseRecipeText(text, sourceUrl = '', { fromPhoto = false } = {}) {
   };
   for (const l of lines) {
     if (!l) { stepStart = true; continue; }
+    if (NUTRI_HEAD_RE.test(l)) { mode = 'skip'; continue; }
+    if (isNutritionLine(l)) continue;
     if (isIngHead(l)) { mode = 'ing'; continue; }
     if (isStepHead(l)) { mode = 'steps'; stepStart = true; continue; }
+    const tipHead = l.match(TIP_HEAD_RE);
+    if (tipHead && (mode !== 'head' || name)) {
+      mode = 'tip';
+      const rest = l.slice(tipHead[0].length).trim();
+      if (rest) tips.push(rest);
+      continue;
+    }
+    if (mode === 'skip') continue;
+    if (mode === 'tip') {
+      if (isFiller(l)) { mode = 'skip'; continue; }
+      if (tips.length && /^[a-zäöüß(,]/.test(l)) tips[tips.length - 1] += ` ${l}`; else tips.push(l);
+      continue;
+    }
+    if (PORTION_RE.test(l) && mode !== 'steps') continue;
     if (mode === 'head') {
       if (isQtyLine(l) && name) { mode = 'ing'; } else {
         if (!name) { name = l.replace(userRe, ''); continue; } // Instagram-Name davor
@@ -309,10 +361,15 @@ function parseRecipeText(text, sourceUrl = '', { fromPhoto = false } = {}) {
       else if (l.length > 40) steps.push({ title: '', text: l });
     }
   }
+  // Füllsätze entfernen
+  for (const st of steps) st.text = cleanStepText(st.text);
+  const realSteps = steps.filter((st) => st.text.length >= 3);
+  steps.length = 0;
+  steps.push(...realSteps);
   name = name.split(/[.!?](?:\s|$)/)[0]
     .replace(/\s+(?:in nur|in|fertig in|in unter)\s+\d+\s*(?:min\.?|minuten)\b.*$/i, '')
     .replace(/[\s:,;.!-]+$/, '');
-  return { name: name.slice(0, 120) || 'Importiertes Rezept', duration: findDuration(text), ingredients: ing, steps, tip: '', source: sourceUrl };
+  return { name: name.slice(0, 120) || 'Importiertes Rezept', duration: findDuration(text), ingredients: ing, steps, tip: tips.map(cleanStepText).filter(Boolean).join(' '), source: sourceUrl };
 }
 
 function firstUrl(s) {
