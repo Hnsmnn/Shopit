@@ -542,7 +542,7 @@ function renderRecipeView(type) {
 
   return `
     <input id="search-${type}" class="input search" type="search" placeholder="Suchen…" value="${esc(ui.search[type])}" data-search="${type}">
-    ${type === 'recipe' ? '<button class="btn ghost wide import-btn" data-act="importRecipe">🌐 Rezept von Website importieren</button>' : ''}
+    ${type === 'recipe' ? '<button class="btn ghost wide import-btn" data-act="importRecipe">📥 Rezept importieren (Website, Foto)</button>' : ''}
     <div class="segmented">
       ${sortKeys(type).map((k) => `<button data-sort="${k}" class="${k === sort ? 'active' : ''}">${SORTS[k].label}</button>`).join('')}
     </div>
@@ -617,7 +617,7 @@ function renderSettings() {
       <b>Android (Chrome):</b> Menü ⋮ → „App installieren“ bzw. „Zum Startbildschirm hinzufügen“.</p>
       <p class="muted">Danach startet Shopit wie eine normale App und funktioniert auch offline.</p>
     </section>`}
-    <p class="muted center">Shopit 2.2</p>
+    <p class="muted center">Shopit 2.3</p>
   `;
 }
 
@@ -638,6 +638,7 @@ function openImportDialog(initialUrl = '') {
         <button type="button" class="btn ghost" data-x>Abbrechen</button>
         <button class="btn primary" data-load>Laden</button>
       </div>
+      <button type="button" class="btn ghost wide photo-btn" data-photo>📷 Aus Foto oder Screenshot</button>
       <button type="button" class="link-btn" data-paste>Klappt nicht? Rezepttext einfügen</button>
     </form>`, (box, done) => {
     const form = $('form', box);
@@ -647,6 +648,7 @@ function openImportDialog(initialUrl = '') {
     setTimeout(() => { if (!input.value) input.focus(); }, 50);
     $('[data-x]', box).onclick = () => done(null);
     $('[data-paste]', box).onclick = () => { done(null); openPasteDialog(firstUrl(input.value)); };
+    $('[data-photo]', box).onclick = () => { done(null); openPhotoDialog({ url: firstUrl(input.value) }); };
     form.onsubmit = async (e) => {
       e.preventDefault();
       if (busy) return;
@@ -673,35 +675,122 @@ function openImportDialog(initialUrl = '') {
   });
 }
 
-function openPasteDialog(url = '') {
+function openPasteDialog(url = '', { text = '', title = 'Rezepttext einfügen', hint = '', fromPhoto = false } = {}) {
   openDialog(`
-    <h3>Rezepttext einfügen</h3>
-    <p class="muted">Auf der Webseite das ganze Rezept markieren (Titel, Zutaten, Zubereitung), kopieren und hier einfügen.</p>
-    <textarea class="input paste-area" placeholder="Rezept hier einfügen"></textarea>
+    <h3>${esc(title)}</h3>
+    <p class="muted">${esc(hint || 'Auf der Webseite das ganze Rezept markieren (Titel, Zutaten, Zubereitung), kopieren und hier einfügen.')}</p>
+    <textarea class="input paste-area" placeholder="Rezept hier einfügen">${esc(text)}</textarea>
     <div class="btn-row">
       <button class="btn ghost" data-x>Abbrechen</button>
       <button class="btn primary" data-ok>Übernehmen</button>
     </div>`, (box, done) => {
-    setTimeout(() => $('textarea', box).focus(), 50);
+    if (!text) setTimeout(() => $('textarea', box).focus(), 50);
     $('[data-x]', box).onclick = () => done(null);
     $('[data-ok]', box).onclick = () => {
-      const text = $('textarea', box).value;
-      if (!text.trim()) return;
+      const value = $('textarea', box).value;
+      if (!value.trim()) return;
       done(true);
-      openRecipeEditor('recipe', null, { prefill: parseRecipeText(text, url) });
+      openRecipeEditor('recipe', null, { prefill: parseRecipeText(value, url, { fromPhoto }) });
     };
   });
 }
 
-// Geteilte Links (Android: Teilen → Shopit) beim Start übernehmen
-function handleSharedLink() {
+function isInstagram(url) {
+  return /(^|\.)(instagram\.com|instagr\.am)$/i.test(hostOf(url));
+}
+
+// Rezept aus Screenshot(s) oder Foto lesen. files: bereits geteilte Bilder (optional)
+function openPhotoDialog({ url = '', files = null } = {}) {
+  const insta = url && isInstagram(url);
+  openDialog(`
+    <h3>Rezept aus Foto</h3>
+    ${insta ? '<p class="note-box">Instagram gibt die Beschreibung nicht an andere Apps weiter. Öffne den Beitrag, tippe auf „mehr“ und mach einen Screenshot der Beschreibung (bei langen Texten mehrere).</p>' : ''}
+    <p class="muted">Screenshot einer Instagram-Beschreibung oder Foto aus Kochbuch oder Zeitschrift. Bei langen Rezepten kannst du mehrere Bilder auf einmal auswählen. Die Bilder bleiben auf deinem Handy.</p>
+    <div class="photo-pick">
+      <label class="btn ghost">📸 Foto aufnehmen<input type="file" accept="image/*" capture="environment" hidden data-cam></label>
+      <label class="btn ghost">🖼️ Bilder auswählen<input type="file" accept="image/*" multiple hidden data-pick></label>
+    </div>
+    <p class="import-status muted" hidden></p>
+    <div class="btn-row">
+      <button type="button" class="btn ghost" data-x>Abbrechen</button>
+    </div>`, (box, done) => {
+    const status = $('.import-status', box);
+    let busy = false;
+    let cancelled = false;
+    $('[data-x]', box).onclick = () => { cancelled = true; done(null); };
+    const run = async (list) => {
+      const imgs = [...(list || [])].filter((f) => f && /^image\//.test(f.type || 'image/'));
+      if (!imgs.length || busy) return;
+      busy = true;
+      box.querySelectorAll('.photo-pick .btn').forEach((b) => b.classList.add('disabled'));
+      status.hidden = false;
+      try {
+        const text = await recognizeImages(imgs, (msg) => { status.textContent = msg; });
+        if (cancelled) return;
+        if (!text.trim()) throw new Error('leer');
+        done(true);
+        openPasteDialog(url, {
+          text,
+          fromPhoto: true,
+          title: 'Erkannten Text prüfen',
+          hint: 'Die Erkennung ist nicht perfekt: Bitte kurz prüfen, besonders die Mengen. Überflüssiges einfach löschen. Am besten erkannt wird es mit den Überschriften „Zutaten“ und „Zubereitung“.',
+        });
+      } catch (err) {
+        busy = false;
+        box.querySelectorAll('.photo-pick .btn').forEach((b) => b.classList.remove('disabled'));
+        status.textContent = err && err.message === 'leer'
+          ? 'Auf dem Bild wurde kein Text erkannt. Versuch ein schärferes Foto mit mehr Licht.'
+          : 'Die Texterkennung hat nicht geklappt. Prüfe die Internetverbindung (beim ersten Mal nötig) und versuch es nochmal.';
+      }
+    };
+    $('[data-cam]', box).onchange = (e) => run(e.target.files);
+    $('[data-pick]', box).onchange = (e) => run(e.target.files);
+    if (files && files.length) run(files);
+  });
+}
+
+// Geteiltes (Android: Teilen → Shopit) beim Start übernehmen:
+// Links, Text (z. B. aus Google Lens) und Bilder (Screenshots, Fotos)
+async function takeSharedImages(n) {
+  const files = [];
+  try {
+    const cache = await caches.open('shopit-share');
+    for (let i = 0; i < n; i++) {
+      const key = `./shared-image-${i}`;
+      const res = await cache.match(key);
+      if (res) {
+        const blob = await res.blob();
+        files.push(new File([blob], `bild-${i + 1}`, { type: blob.type || 'image/jpeg' }));
+      }
+      await cache.delete(key);
+    }
+  } catch (e) { /* kein Zugriff auf den Zwischenspeicher */ }
+  return files;
+}
+
+async function handleSharedLink() {
   const params = new URLSearchParams(location.search);
-  if (!params.has('url') && !params.has('text') && !params.has('title')) return;
-  const url = firstUrl(params.get('url')) || firstUrl(params.get('text')) || firstUrl(params.get('title'));
+  if (!params.has('url') && !params.has('text') && !params.has('title') && !params.has('shared-images')) return;
+  const text = params.get('text') || '';
+  const url = firstUrl(params.get('url')) || firstUrl(text) || firstUrl(params.get('title'));
+  const imageCount = parseInt(params.get('shared-images'), 10) || 0;
   history.replaceState(null, '', location.pathname);
-  if (!url) return;
   ui.view = 'recipe';
   render();
+  if (imageCount) {
+    const files = await takeSharedImages(imageCount);
+    if (files.length) { openPhotoDialog({ url, files }); return; }
+    toast('Das geteilte Bild konnte nicht geöffnet werden.');
+    return;
+  }
+  const plain = text.replace(url, '').trim();
+  if (plain.split('\n').filter((l) => l.trim()).length >= 3) {
+    // Geteilter Rezepttext
+    openPasteDialog(url, { text: plain, title: 'Geteilten Text prüfen', hint: 'Bitte kurz prüfen und Überflüssiges löschen.' });
+    return;
+  }
+  if (!url) return;
+  if (isInstagram(url)) { openPhotoDialog({ url }); return; }
   openImportDialog(url);
 }
 

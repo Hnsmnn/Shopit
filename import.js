@@ -214,28 +214,89 @@ function parseRecipeHtml(html, sourceUrl = '') {
 
 /* ---------- Eingefügter Text ---------- */
 // Für Seiten, die nicht geladen werden können: Rezept auf der Webseite
-// markieren, kopieren und hier einfügen.
+// markieren, kopieren und hier einfügen. Wird auch für Text aus Fotos und
+// Instagram-Beschreibungen verwendet.
 
-function parseRecipeText(text, sourceUrl = '') {
-  const lines = String(text || '').split(/\r?\n/).map((l) => l.trim());
-  const isIngHead = (l) => /^(zutaten|zutaten für|zutatenliste|ingredients)\b/i.test(l);
-  const isStepHead = (l) => /^(zubereitung|anleitung|so geht'?s|so wird'?s gemacht|schritte|arbeitsschritte|instructions|directions|method)\b/i.test(l);
+// Hashtags, @Erwähnungen und Emojis/Aufzählungszeichen am Zeilenanfang entfernen
+function stripRecipeNoise(line) {
+  return String(line || '')
+    .replace(/[\uFE0F\u20E3\u200D]/g, '')
+    .replace(/(^|\s)#[\p{L}\p{N}_]+/gu, ' ')
+    .replace(/(^|\s)@[\w.]+/g, ' ')
+    .replace(/\p{Extended_Pictographic}/gu, ' ')
+    .replace(/^[^\p{L}\p{N}½¼¾⅓⅔⅛(„"]+/u, '')
+    .replace(/(\d)\s*mi!?(?=\s)/g, '$1 ml')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+const ING_HEAD_RE = /^(?:\S{1,2}\s+)?(zutaten|zutatenliste|einkaufsliste|das brauchst du|du brauchst|was du brauchst|ingredients|you need)\b/i;
+const STEP_HEAD_RE = /^(?:\S{1,2}\s+)?(zubereitung|anleitung|so geht'?s|so wird'?s gemacht|so gehts|schritte|arbeitsschritte|und so geht'?s|instructions|directions|method|preparation)\b/i;
+
+function findDuration(text) {
+  const t = String(text || '');
+  let m = t.match(/(?:zubereitungszeit|gesamtzeit|arbeitszeit|kochzeit|dauer|zeit|in\s+nur|fertig\s+in|time)\s*:?\s*(?:ca\.?\s*)?(\d{1,2})\s*(?:std\.?|stunden?|h)\b(?:\s*(\d{1,2})\s*min)?/i);
+  if (m) return (+m[1]) * 60 + (+(m[2] || 0));
+  m = t.match(/(?:zubereitungszeit|gesamtzeit|arbeitszeit|kochzeit|dauer|zeit|in\s+nur|fertig\s+in|time)\s*:?\s*(?:ca\.?\s*)?(\d{1,3})\s*(?:min\.?|minuten|minutes)\b/i);
+  if (m) return +m[1];
+  // "Pasta in 15 Minuten" nur im Titelbereich, nicht in den Schritten
+  const head = t.split(/\n/).filter((l) => l.trim()).slice(0, 3).join(' ');
+  m = head.match(/\bin\s+(\d{1,3})\s*(?:min\.?|minuten|minutes)\b/i);
+  return m ? +m[1] : null;
+}
+
+function parseRecipeText(text, sourceUrl = '', { fromPhoto = false } = {}) {
+  // Bei Fotos/Screenshots ist der Zeilenumbruch nur Layout; bei kopiertem Text meist ein neuer Absatz
+  const userRe = fromPhoto ? /^[a-z0-9._]{5,30}\s+(?=\p{Lu})/u : /^[a-z0-9]*[._][a-z0-9._]*\s+(?=\p{Lu})/u;
+  const lines = String(text || '').split(/\r?\n/).map(stripRecipeNoise);
+  const isIngHead = (l) => ING_HEAD_RE.test(l);
+  const isStepHead = (l) => STEP_HEAD_RE.test(l);
+  const isQtyLine = (l) => QTY_RE.test(l) && l.length < 80 && !/[.!?]$/.test(l);
+  const isSubHead = (l) => /:$/.test(l) && l.length < 50 && !QTY_RE.test(l);
   let name = '';
   const ing = [];
   const steps = [];
   let mode = 'head';
+  let headDone = false;
+  let stepStart = false; // neuer Schritt beginnt (Nummer/Aufzählung oder Leerzeile)
+  const addStep = (l) => {
+    const numbered = /^(schritt\s*)?\d{1,2}[.):]\s*/i.test(l);
+    const t = l.replace(/^(schritt\s*)?\d{1,2}[.):]\s*/i, '').replace(/^schritt\s*\d{1,2}\s+/i, '');
+    if (t.length < 3) { stepStart = true; return; }
+    const last = steps[steps.length - 1];
+    // Zeilenumbrüche mitten im Satz (Fotos, Screenshots) wieder zusammenfügen
+    if (last && !numbered && !stepStart && (/^[a-zäöüß(,]/.test(t) || (fromPhoto && !/[.!?:)]$/.test(last.text)))) {
+      last.text = `${last.text} ${t}`;
+    } else {
+      steps.push({ title: '', text: t.charAt(0).toUpperCase() + t.slice(1) });
+    }
+    stepStart = false;
+  };
   for (const l of lines) {
-    if (!l) continue;
+    if (!l) { stepStart = true; continue; }
     if (isIngHead(l)) { mode = 'ing'; continue; }
-    if (isStepHead(l)) { mode = 'steps'; continue; }
-    if (mode === 'head') { if (!name) name = l; continue; }
+    if (isStepHead(l)) { mode = 'steps'; stepStart = true; continue; }
+    if (mode === 'head') {
+      if (isQtyLine(l) && name) { mode = 'ing'; } else {
+        if (!name) { name = l.replace(userRe, ''); continue; } // Instagram-Name davor
+        if (!headDone && /^[a-zäöüß]/.test(l) && !/[.!?]$/.test(name)) name = `${name} ${l.replace(userRe, '')}`;
+        headDone = true;
+        continue;
+      }
+    }
     if (mode === 'ing') {
+      if (isSubHead(l)) continue; // z. B. "Für die Soße:"
+      if (!QTY_RE.test(l) && l.length > 60 && /[.!?]$/.test(l)) { mode = 'steps'; addStep(l); continue; }
+      // "Salz, Pfeffer, Basilikum" ohne Mengen: einzelne Zutaten
+      const parts = l.split(/\s*[,;]\s*|\s+(?:und|&)\s+/);
+      if (!QTY_RE.test(l) && parts.length > 1 && parts.every((x) => x && x.split(' ').length <= 2 && !/\d/.test(x))) {
+        parts.forEach((x) => { const p = parseIngredientLine(x); if (p) ing.push(p); });
+        continue;
+      }
       const p = parseIngredientLine(l);
       if (p) ing.push(p);
     } else {
-      const t = l.replace(/^(schritt\s*)?\d{1,2}[.):]?\s*/i, '');
-      if (t.length < 3) continue;
-      steps.push({ title: '', text: t });
+      addStep(l);
     }
   }
   if (!ing.length && !steps.length) {
@@ -244,11 +305,14 @@ function parseRecipeText(text, sourceUrl = '') {
     for (const l of lines) {
       if (!l) continue;
       if (first) { name = l; first = false; continue; }
-      if (QTY_RE.test(l) && l.length < 80) { const p = parseIngredientLine(l); if (p) ing.push(p); }
+      if (isQtyLine(l)) { const p = parseIngredientLine(l); if (p) ing.push(p); }
       else if (l.length > 40) steps.push({ title: '', text: l });
     }
   }
-  return { name: name.slice(0, 120) || 'Importiertes Rezept', duration: null, ingredients: ing, steps, tip: '', source: sourceUrl };
+  name = name.split(/[.!?](?:\s|$)/)[0]
+    .replace(/\s+(?:in nur|in|fertig in|in unter)\s+\d+\s*(?:min\.?|minuten)\b.*$/i, '')
+    .replace(/[\s:,;.!-]+$/, '');
+  return { name: name.slice(0, 120) || 'Importiertes Rezept', duration: findDuration(text), ingredients: ing, steps, tip: '', source: sourceUrl };
 }
 
 function firstUrl(s) {
