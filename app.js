@@ -617,7 +617,7 @@ function renderSettings() {
       <b>Android (Chrome):</b> Menü ⋮ → „App installieren“ bzw. „Zum Startbildschirm hinzufügen“.</p>
       <p class="muted">Danach startet Shopit wie eine normale App und funktioniert auch offline.</p>
     </section>`}
-    <p class="muted center">Shopit 2.3</p>
+    <p class="muted center">Shopit 2.3.1</p>
   `;
 }
 
@@ -705,30 +705,68 @@ function openPhotoDialog({ url = '', files = null } = {}) {
   openDialog(`
     <h3>Rezept aus Foto</h3>
     ${insta ? '<p class="note-box">Instagram gibt die Beschreibung nicht an andere Apps weiter. Öffne den Beitrag, tippe auf „mehr“ und mach einen Screenshot der Beschreibung (bei langen Texten mehrere).</p>' : ''}
-    <p class="muted">Screenshot einer Instagram-Beschreibung oder Foto aus Kochbuch oder Zeitschrift. Bei langen Rezepten kannst du mehrere Bilder auf einmal auswählen. Die Bilder bleiben auf deinem Handy.</p>
+    <p class="muted" data-intro>Screenshot einer Instagram-Beschreibung oder Foto aus Kochbuch oder Zeitschrift. Bei langen Rezepten kannst du mehrere Bilder auswählen. Die Bilder bleiben auf deinem Handy.</p>
+    <ol class="photo-list" hidden></ol>
     <div class="photo-pick">
       <label class="btn ghost">📸 Foto aufnehmen<input type="file" accept="image/*" capture="environment" hidden data-cam></label>
-      <label class="btn ghost">🖼️ Bilder auswählen<input type="file" accept="image/*" multiple hidden data-pick></label>
+      <label class="btn ghost"><span data-picklabel>🖼️ Bilder auswählen</span><input type="file" accept="image/*" multiple hidden data-pick></label>
     </div>
     <p class="import-status muted" hidden></p>
     <div class="btn-row">
       <button type="button" class="btn ghost" data-x>Abbrechen</button>
+      <button type="button" class="btn primary" data-go hidden>Text erkennen</button>
     </div>`, (box, done) => {
     const status = $('.import-status', box);
+    const listEl = $('.photo-list', box);
+    const goBtn = $('[data-go]', box);
+    let chosen = []; // { file, src }
     let busy = false;
     let cancelled = false;
-    $('[data-x]', box).onclick = () => { cancelled = true; done(null); };
-    const run = async (list) => {
-      const imgs = [...(list || [])].filter((f) => f && /^image\//.test(f.type || 'image/'));
-      if (!imgs.length || busy) return;
+    const cleanup = () => chosen.forEach((c) => URL.revokeObjectURL(c.src));
+    const finish = (val) => { cleanup(); done(val); };
+    $('[data-x]', box).onclick = () => { cancelled = true; finish(null); };
+
+    const drawList = () => {
+      listEl.hidden = chosen.length === 0;
+      goBtn.hidden = chosen.length === 0;
+      $('[data-picklabel]', box).textContent = chosen.length ? '➕ Weitere Bilder' : '🖼️ Bilder auswählen';
+      $('[data-intro]', box).textContent = chosen.length > 1
+        ? 'Reihenfolge prüfen: Das Bild mit dem Anfang des Rezepts gehört nach oben. Mit ▲ ▼ verschieben.'
+        : 'Screenshot einer Instagram-Beschreibung oder Foto aus Kochbuch oder Zeitschrift. Bei langen Rezepten kannst du mehrere Bilder auswählen. Die Bilder bleiben auf deinem Handy.';
+      listEl.innerHTML = chosen.map((c, i) => `
+        <li>
+          <span class="photo-num">${i + 1}</span>
+          <img src="${c.src}" alt="Bild ${i + 1}">
+          <span class="photo-btns">
+            <button type="button" class="icon-btn" data-up="${i}" ${i === 0 ? 'disabled' : ''} aria-label="Nach oben">▲</button>
+            <button type="button" class="icon-btn" data-down="${i}" ${i === chosen.length - 1 ? 'disabled' : ''} aria-label="Nach unten">▼</button>
+            <button type="button" class="icon-btn" data-del="${i}" aria-label="Entfernen">✕</button>
+          </span>
+        </li>`).join('');
+    };
+    listEl.onclick = (e) => {
+      if (busy) return;
+      const t = e.target.closest('button');
+      if (!t) return;
+      const swap = (i, j) => { [chosen[i], chosen[j]] = [chosen[j], chosen[i]]; };
+      if (t.dataset.up) swap(+t.dataset.up, +t.dataset.up - 1);
+      else if (t.dataset.down) swap(+t.dataset.down, +t.dataset.down + 1);
+      else if (t.dataset.del) { const [c] = chosen.splice(+t.dataset.del, 1); URL.revokeObjectURL(c.src); }
+      drawList();
+    };
+
+    const run = async () => {
+      if (!chosen.length || busy) return;
       busy = true;
       box.querySelectorAll('.photo-pick .btn').forEach((b) => b.classList.add('disabled'));
+      goBtn.disabled = true;
+      listEl.classList.add('busy');
       status.hidden = false;
       try {
-        const text = await recognizeImages(imgs, (msg) => { status.textContent = msg; });
+        const text = await recognizeImages(chosen.map((c) => c.file), (msg) => { status.textContent = msg; });
         if (cancelled) return;
         if (!text.trim()) throw new Error('leer');
-        done(true);
+        finish(true);
         openPasteDialog(url, {
           text,
           fromPhoto: true,
@@ -738,14 +776,31 @@ function openPhotoDialog({ url = '', files = null } = {}) {
       } catch (err) {
         busy = false;
         box.querySelectorAll('.photo-pick .btn').forEach((b) => b.classList.remove('disabled'));
+        goBtn.disabled = false;
+        listEl.classList.remove('busy');
         status.textContent = err && err.message === 'leer'
           ? 'Auf dem Bild wurde kein Text erkannt. Versuch ein schärferes Foto mit mehr Licht.'
           : 'Die Texterkennung hat nicht geklappt. Prüfe die Internetverbindung (beim ersten Mal nötig) und versuch es nochmal.';
       }
     };
-    $('[data-cam]', box).onchange = (e) => run(e.target.files);
-    $('[data-pick]', box).onchange = (e) => run(e.target.files);
-    if (files && files.length) run(files);
+    goBtn.onclick = run;
+
+    // sortByTime: ausgewählte Bilder nach Aufnahmezeit ordnen (Screenshots
+    // in der Reihenfolge, in der sie gemacht wurden)
+    const add = (list, sortByTime) => {
+      let imgs = [...(list || [])].filter((f) => f && /^image\//.test(f.type || 'image/'));
+      if (!imgs.length) return;
+      if (sortByTime) imgs = imgs.map((f, i) => ({ f, i })).sort((x, y) => (x.f.lastModified - y.f.lastModified) || (x.i - y.i)).map((x) => x.f);
+      const wasEmpty = chosen.length === 0;
+      chosen.push(...imgs.map((file) => ({ file, src: URL.createObjectURL(file) })));
+      status.hidden = true;
+      // Ein einzelnes Bild direkt erkennen, bei mehreren erst die Reihenfolge zeigen
+      if (wasEmpty && chosen.length === 1) { drawList(); run(); return; }
+      drawList();
+    };
+    $('[data-cam]', box).onchange = (e) => { add(e.target.files, false); e.target.value = ''; };
+    $('[data-pick]', box).onchange = (e) => { add(e.target.files, true); e.target.value = ''; };
+    if (files && files.length) add(files, false);
   });
 }
 
